@@ -71,6 +71,14 @@ class CompanyPage(QWizardPage):
         self.receipt_padding.setRange(1, 10)
         self.receipt_padding.setValue(4)
 
+        self.signature_path_edit = QLineEdit()
+        self.signature_path_edit.setReadOnly(True)
+        sig_browse_btn = QPushButton("Επιλογή αρχείου...")
+        sig_browse_btn.clicked.connect(self._browse_signature)
+        sig_row = QHBoxLayout()
+        sig_row.addWidget(self.signature_path_edit)
+        sig_row.addWidget(sig_browse_btn)
+
         form = QFormLayout()
         form.addRow("Αποθηκευμένη εταιρεία:", self.company_combo)
         form.addRow("Επωνυμία:", self.name)
@@ -80,6 +88,7 @@ class CompanyPage(QWizardPage):
         form.addRow("Email:", self.email)
         form.addRow("Πρόθεμα αρ. απόδειξης:", self.receipt_prefix)
         form.addRow("Ψηφία αρίθμησης:", self.receipt_padding)
+        form.addRow("Υπογραφή υπευθύνου (εικόνα):", sig_row)
         self.setLayout(form)
 
         for w in (self.name, self.subtitle, self.address, self.ids, self.email):
@@ -88,6 +97,15 @@ class CompanyPage(QWizardPage):
         self._company_id = None
         self._default_cap = None
         self._default_round_step = None
+        self._output_dir = None
+
+    def _browse_signature(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Επιλογή εικόνας υπογραφής", "",
+            "Εικόνες (*.png *.jpg *.jpeg *.bmp)",
+        )
+        if path:
+            self.signature_path_edit.setText(path)
 
     def _reload_companies(self):
         self.company_combo.blockSignals(True)
@@ -103,6 +121,8 @@ class CompanyPage(QWizardPage):
         if company_id is None:
             self._default_cap = None
             self._default_round_step = None
+            self._output_dir = None
+            self.signature_path_edit.setText("")
             return
         row = next((r for r in dbmod.list_companies(DB) if r["id"] == company_id), None)
         if row is None:
@@ -114,8 +134,10 @@ class CompanyPage(QWizardPage):
         self.email.setText(row["email"] or "")
         self.receipt_prefix.setText(row["receipt_prefix"] or "ΧΑΕ-")
         self.receipt_padding.setValue(row["receipt_padding"] or 4)
+        self.signature_path_edit.setText(row["signature_path"] or "")
         self._default_cap = row["default_cap"]
         self._default_round_step = row["default_round_step"]
+        self._output_dir = row["output_dir"]
 
     def isComplete(self) -> bool:
         return bool(self.name.text().strip())
@@ -131,14 +153,11 @@ class CompanyPage(QWizardPage):
         wiz.receipt_padding = self.receipt_padding.value()
         wiz.default_cap = self._default_cap
         wiz.default_round_step = self._default_round_step
+        wiz.signature_path = self.signature_path_edit.text().strip() or None
+        wiz.output_dir = self._output_dir
+        wiz.company_id = self._company_id
 
-        wiz.company_id = dbmod.upsert_company(
-            DB, company_id=self._company_id, name=wiz.company_name,
-            subtitle=wiz.company_subtitle, address_line=wiz.company_address,
-            ids_line=wiz.company_ids, email=wiz.company_email,
-            receipt_prefix=wiz.receipt_prefix, receipt_padding=wiz.receipt_padding,
-            default_cap=self._default_cap, default_round_step=self._default_round_step,
-        )
+        wiz.save_company()
         self._company_id = wiz.company_id
         return True
 
@@ -375,13 +394,9 @@ class AmountPage(QWizardPage):
         wiz.amount = self.amount.value()
         wiz.cap = self.cap.value()
         wiz.round_step = self.round_step.value()
-        dbmod.upsert_company(
-            DB, company_id=wiz.company_id, name=wiz.company_name,
-            subtitle=wiz.company_subtitle, address_line=wiz.company_address,
-            ids_line=wiz.company_ids, email=wiz.company_email,
-            receipt_prefix=wiz.receipt_prefix, receipt_padding=wiz.receipt_padding,
-            default_cap=wiz.cap, default_round_step=wiz.round_step,
-        )
+        wiz.default_cap = wiz.cap
+        wiz.default_round_step = wiz.round_step
+        wiz.save_company()
 
         overrides = []
         for row in range(self.opening_table.rowCount()):
@@ -625,6 +640,13 @@ class GeneratePage(QWizardPage):
         self._out_dir = None
         self._done = False
 
+    def initializePage(self):
+        wiz = self.wizard()
+        if wiz.output_dir:
+            self._out_dir = wiz.output_dir
+            self.out_dir_label.setText(self._out_dir)
+            self.generate_btn.setEnabled(True)
+
     def _browse(self):
         path = QFileDialog.getExistingDirectory(self, "Φάκελος εξόδου")
         if not path:
@@ -658,6 +680,7 @@ class GeneratePage(QWizardPage):
                 company_address_line=wiz.company_address,
                 company_ids_line=wiz.company_ids,
                 company_email=wiz.company_email,
+                signature_path=wiz.signature_path,
             )
             out_name = f"{date_dt.strftime('%Y_%m_%d')} {str(receipt_no).zfill(6)}.pdf"
             out_path = os.path.join(self._out_dir, out_name)
@@ -680,6 +703,8 @@ class GeneratePage(QWizardPage):
             receipt_no_end=receipt_no - 1, out_dir=self._out_dir,
             created_at=datetime.now().isoformat(timespec="seconds"),
         )
+        wiz.output_dir = self._out_dir
+        wiz.save_company()
 
         self._done = True
         self.result_label.setText(
@@ -711,6 +736,8 @@ class ReceiptWizard(QWizard):
         self.company_id = None
         self.default_cap = None
         self.default_round_step = None
+        self.signature_path = None
+        self.output_dir = None
 
         self.setPage(PAGE_COMPANY, CompanyPage())
         self.setPage(PAGE_LEDGER, LedgerPage())
@@ -719,6 +746,21 @@ class ReceiptWizard(QWizard):
         self.setPage(PAGE_DATES, DatesPage())
         self.setPage(PAGE_PREVIEW, PreviewPage())
         self.setPage(PAGE_GENERATE, GeneratePage())
+
+    def save_company(self):
+        """Upsert στο companies row βάσει της τρέχουσας κατάστασης του
+        wizard -- καλείται από κάθε βήμα που ενημερώνει κάτι στην εταιρεία
+        (όνομα/στοιχεία, όριο/round-step, φάκελος εξόδου) ώστε καμία στήλη
+        να μη σβήνεται κατά λάθος από ένα μερικό upsert."""
+        self.company_id = dbmod.upsert_company(
+            DB, company_id=self.company_id, name=self.company_name,
+            subtitle=self.company_subtitle, address_line=self.company_address,
+            ids_line=self.company_ids, email=self.company_email,
+            receipt_prefix=self.receipt_prefix, receipt_padding=self.receipt_padding,
+            default_cap=self.default_cap, default_round_step=self.default_round_step,
+            signature_path=self.signature_path, output_dir=self.output_dir,
+        )
+        return self.company_id
         self.setStartId(PAGE_COMPANY)
 
 

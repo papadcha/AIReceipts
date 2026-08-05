@@ -12,10 +12,11 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    HRFlowable, Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 from core.amount_words import amount_to_words
@@ -59,6 +60,8 @@ class ReceiptData:
     company_address_line: str
     company_ids_line: str
     company_email: str
+    signature_path: str | None  # εικόνα υπογραφής υπευθύνου, μπαίνει στη στήλη
+    # "Ο Λαβών" όταν εισπράττουμε ή "Ο Πληρώσας" όταν πληρώνουμε (βλ. is_payment)
 
 
 def _company_header(r: ReceiptData):
@@ -158,18 +161,37 @@ def _cash_table(r: ReceiptData):
     return t
 
 
+def _fit_image(path: str, max_w: float, max_h: float):
+    """Εικόνα υπογραφής, scaled ώστε να χωράει στο κελί κρατώντας αναλογία."""
+    try:
+        iw, ih = ImageReader(path).getSize()
+    except Exception:  # noqa: BLE001 -- αρχείο άκυρο/λείπει, κελί μένει κενό
+        return ""
+    scale = min(max_w / iw, max_h / ih)
+    return Image(path, width=iw * scale, height=ih * scale)
+
+
 def _footer_table(r: ReceiptData):
+    labon_cell, plirosas_cell = "", ""
+    if r.signature_path:
+        sig = _fit_image(r.signature_path, max_w=32 * mm, max_h=12 * mm)
+        if r.is_payment:
+            plirosas_cell = sig  # η εταιρεία πληρώνει -> υπογράφει ως "Ο Πληρώσας"
+        else:
+            labon_cell = sig  # η εταιρεία εισπράττει -> υπογράφει ως "Ο Λαβών"
+
     data = [
         [Paragraph("<b>Αιτιολογία</b>", STYLES["footlabel"]),
          Paragraph("<b>Ο Λαβών</b>", STYLES["footlabel"]),
          Paragraph("<b>Ο Πληρώσας</b>", STYLES["footlabel"])],
-        [Paragraph(r.aitiologia.replace("\n", "<br/>"), STYLES["body"]), "", ""],
+        [Paragraph(r.aitiologia.replace("\n", "<br/>"), STYLES["body"]), labon_cell, plirosas_cell],
     ]
     t = Table(data, colWidths=[85 * mm, 35 * mm, 40 * mm], rowHeights=[5.5 * mm, 14 * mm])
     t.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.8, BORDER),
         ("INNERGRID", (0, 0), (-1, -1), 0.4, BORDER),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 1), (2, 1), "CENTER"),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
     ]))

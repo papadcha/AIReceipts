@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS companies (
     receipt_prefix TEXT,
     receipt_padding INTEGER,
     default_cap REAL,
-    default_round_step REAL
+    default_round_step REAL,
+    signature_path TEXT,
+    output_dir TEXT
 );
 
 CREATE TABLE IF NOT EXISTS contacts (
@@ -49,11 +51,24 @@ CREATE TABLE IF NOT EXISTS receipt_runs (
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Προσθέτει στήλες σε ήδη υπάρχον app_data.db από παλιότερη έκδοση του
+    schema -- το CREATE TABLE IF NOT EXISTS παραπάνω δεν αγγίζει πίνακες που
+    ήδη υπάρχουν."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(companies)")}
+    if "signature_path" not in cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN signature_path TEXT")
+    if "output_dir" not in cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN output_dir TEXT")
+    conn.commit()
+
+
 def get_connection(path: Path | str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path or DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -74,6 +89,8 @@ def upsert_company(
     receipt_padding: int,
     default_cap: float,
     default_round_step: float,
+    signature_path: str | None = None,
+    output_dir: str | None = None,
 ) -> int:
     """Insert ή update -- αν δοθεί company_id ενημερώνει εκείνη τη γραμμή,
     αλλιώς κάνει upsert στο μοναδικό name (νέα εταιρεία ή ίδιο όνομα με
@@ -82,9 +99,10 @@ def upsert_company(
         conn.execute(
             """UPDATE companies SET name=?, subtitle=?, address_line=?, ids_line=?,
                email=?, receipt_prefix=?, receipt_padding=?, default_cap=?,
-               default_round_step=? WHERE id=?""",
+               default_round_step=?, signature_path=?, output_dir=? WHERE id=?""",
             (name, subtitle, address_line, ids_line, email, receipt_prefix,
-             receipt_padding, default_cap, default_round_step, company_id),
+             receipt_padding, default_cap, default_round_step, signature_path,
+             output_dir, company_id),
         )
         conn.commit()
         return company_id
@@ -92,18 +110,21 @@ def upsert_company(
     row = conn.execute(
         """INSERT INTO companies
                (name, subtitle, address_line, ids_line, email, receipt_prefix,
-                receipt_padding, default_cap, default_round_step)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                receipt_padding, default_cap, default_round_step, signature_path,
+                output_dir)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(name) DO UPDATE SET
                subtitle=excluded.subtitle, address_line=excluded.address_line,
                ids_line=excluded.ids_line, email=excluded.email,
                receipt_prefix=excluded.receipt_prefix,
                receipt_padding=excluded.receipt_padding,
                default_cap=excluded.default_cap,
-               default_round_step=excluded.default_round_step
+               default_round_step=excluded.default_round_step,
+               signature_path=excluded.signature_path,
+               output_dir=excluded.output_dir
            RETURNING id""",
         (name, subtitle, address_line, ids_line, email, receipt_prefix,
-         receipt_padding, default_cap, default_round_step),
+         receipt_padding, default_cap, default_round_step, signature_path, output_dir),
     ).fetchone()
     conn.commit()
     return row["id"]
