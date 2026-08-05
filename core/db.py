@@ -148,6 +148,18 @@ def upsert_contact(conn: sqlite3.Connection, *, afm: str, name: str, occupation:
     conn.commit()
 
 
+def list_receipt_runs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Ιστορικό εκδόσεων, πιο πρόσφατο πρώτα, με το όνομα εταιρείας/επαφής
+    ήδη joined -- για την οθόνη Ιστορικού."""
+    return conn.execute(
+        """SELECT rr.*, c.name AS company_name, ct.name AS contact_name
+           FROM receipt_runs rr
+           JOIN companies c ON c.id = rr.company_id
+           LEFT JOIN contacts ct ON ct.afm = rr.contact_afm
+           ORDER BY rr.id DESC"""
+    ).fetchall()
+
+
 def suggest_next_receipt_no(
     conn: sqlite3.Connection, *, company_id: int | None, seira: str, receipt_prefix: str,
 ) -> int | None:

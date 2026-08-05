@@ -16,10 +16,10 @@ from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
-    QDateEdit, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QDateEdit, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMessageBox,
     QPushButton, QRadioButton, QSpinBox, QTableWidget, QTableWidgetItem,
-    QTextEdit, QVBoxLayout, QWizard, QWizardPage,
+    QTextEdit, QVBoxLayout, QWidget, QWizard, QWizardPage,
 )
 
 from core import company_import, db as dbmod
@@ -829,6 +829,7 @@ class ReceiptWizard(QWizard):
         self.setPage(PAGE_DATES, DatesPage())
         self.setPage(PAGE_PREVIEW, PreviewPage())
         self.setPage(PAGE_GENERATE, GeneratePage())
+        self.setStartId(PAGE_COMPANY)
 
     def save_company(self):
         """Upsert στο companies row βάσει της τρέχουσας κατάστασης του
@@ -844,13 +845,126 @@ class ReceiptWizard(QWizard):
             signature_path=self.signature_path, output_dir=self.output_dir,
         )
         return self.company_id
-        self.setStartId(PAGE_COMPANY)
+
+
+class HistoryDialog(QDialog):
+    """Δευτερεύουσα οθόνη -- λίστα προηγούμενων εκτελέσεων (receipt_runs),
+    με άνοιγμα του φακέλου παραγωγής και αντιγραφή των κωδικών της
+    επιλεγμένης εκτέλεσης (για επικόλληση στο πεδίο εξαίρεσης του βήματος
+    "Κάρτελα", σε σενάριο επανέκδοσης)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Ιστορικό αποδείξεων")
+        self.resize(860, 420)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels([
+            "Ημερομηνία", "Εταιρεία", "Πελάτης/Προμηθευτής", "Κατεύθυνση",
+            "Ποσό", "Αποδείξεις", "Φάκελος",
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+
+        open_btn = QPushButton("Άνοιγμα φακέλου")
+        open_btn.clicked.connect(self._open_folder)
+        copy_btn = QPushButton("Αντιγραφή κωδικών (για εξαίρεση σε επανέκδοση)")
+        copy_btn.clicked.connect(self._copy_codes)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(open_btn)
+        btn_row.addWidget(copy_btn)
+        btn_row.addStretch(1)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.table)
+        layout.addLayout(btn_row)
+        self.setLayout(layout)
+
+        self._rows = []
+        self._reload()
+
+    def _reload(self):
+        self._rows = dbmod.list_receipt_runs(DB)
+        self.table.setRowCount(0)
+        for r in self._rows:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            direction = "Πληρωμή" if r["direction"] == "payment" else "Είσπραξη"
+            no_range = (
+                f"{r['receipt_prefix']}{str(r['receipt_no_start']).zfill(r['receipt_padding'])}"
+                f"..{r['receipt_prefix']}{str(r['receipt_no_end']).zfill(r['receipt_padding'])}"
+            )
+            self.table.setItem(row, 0, QTableWidgetItem((r["created_at"] or "")[:10]))
+            self.table.setItem(row, 1, QTableWidgetItem(r["company_name"] or ""))
+            self.table.setItem(row, 2, QTableWidgetItem(r["contact_name"] or r["contact_afm"] or ""))
+            self.table.setItem(row, 3, QTableWidgetItem(direction))
+            self.table.setItem(row, 4, QTableWidgetItem(f"{r['amount']:.2f} €"))
+            self.table.setItem(row, 5, QTableWidgetItem(no_range))
+            self.table.setItem(row, 6, QTableWidgetItem(r["out_dir"] or ""))
+
+    def _selected_row(self):
+        idx = self.table.currentRow()
+        if idx < 0 or idx >= len(self._rows):
+            return None
+        return self._rows[idx]
+
+    def _open_folder(self):
+        r = self._selected_row()
+        if not r:
+            return
+        if r["out_dir"] and sys.platform == "win32" and os.path.isdir(r["out_dir"]):
+            os.startfile(r["out_dir"])  # noqa: S606
+        else:
+            QMessageBox.warning(self, "Ο φάκελος δεν βρέθηκε", f"Δεν υπάρχει πλέον:\n{r['out_dir']}")
+
+    def _copy_codes(self):
+        r = self._selected_row()
+        if not r:
+            return
+        codes = [
+            f"{r['receipt_prefix']}{str(n).zfill(r['receipt_padding'])}"
+            for n in range(r["receipt_no_start"], r["receipt_no_end"] + 1)
+        ]
+        QApplication.clipboard().setText(", ".join(codes))
+
+
+class LauncherWindow(QWidget):
+    """Πρώτο παράθυρο -- επιλογή μεταξύ νέας απόδειξης (wizard) και
+    ιστορικού (HistoryDialog)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Αiποδείξεις")
+        self.resize(320, 140)
+
+        new_btn = QPushButton("Νέα απόδειξη...")
+        new_btn.clicked.connect(self._new_receipt)
+        history_btn = QPushButton("Ιστορικό...")
+        history_btn.clicked.connect(self._show_history)
+
+        layout = QVBoxLayout()
+        layout.addWidget(new_btn)
+        layout.addWidget(history_btn)
+        self.setLayout(layout)
+
+        self._wizard = None
+        self._history = None
+
+    def _new_receipt(self):
+        self._wizard = ReceiptWizard()
+        self._wizard.show()
+
+    def _show_history(self):
+        self._history = HistoryDialog(self)
+        self._history.show()
 
 
 def main():
     app = QApplication(sys.argv)
-    wiz = ReceiptWizard()
-    wiz.show()
+    win = LauncherWindow()
+    win.show()
     sys.exit(app.exec())
 
 
