@@ -10,8 +10,10 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QDate, Qt
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
@@ -22,7 +24,8 @@ from PySide6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget, QWizard, QWizardPage,
 )
 
-from core import company_import, db as dbmod
+from core import company_import, db as dbmod, email_sender, presence
+from core import sync as syncmod
 from core.allocation import (
     allocate_receipts, build_aitiologia, linear_dates,
     spread_dates_respecting_invoices,
@@ -38,6 +41,16 @@ DB = dbmod.get_connection()
 ) = range(7)
 
 DATE_FMT_QT = "dd/MM/yyyy"
+
+# Ίδιο χρωματολόγιο με τα αδερφά projects (expvault/lab-galatista, βλ.
+# css/app.css --status-ok / --status-danger) -- πράσινο/κόκκινο σημαίνουν
+# πάντα το ίδιο πράγμα σε όλα τα εργαλεία της οικογένειας.
+STATUS_OK_COLOR = "#16a34a"
+STATUS_OK_BG = "rgba(22,163,74,0.16)"
+STATUS_OK_BORDER = "rgba(22,163,74,0.35)"
+STATUS_DANGER_COLOR = "#dc2626"
+STATUS_DANGER_BG = "rgba(220,38,38,0.15)"
+STATUS_DANGER_BORDER = "rgba(220,38,38,0.4)"
 
 
 def _qdate_to_dt(qd: QDate) -> datetime:
@@ -95,7 +108,37 @@ class CompanyPage(QWizardPage):
         form.addRow("Πρόθεμα αρ. απόδειξης:", self.receipt_prefix)
         form.addRow("Ψηφία αρίθμησης:", self.receipt_padding)
         form.addRow("Υπογραφή υπευθύνου (εικόνα):", sig_row)
-        self.setLayout(form)
+
+        # -- SMTP: τοπικά ανά σταθμό, όχι μέσα στο κανονικό sync manifest
+        # (core/sync.py) -- ένας σταθμός δεν σημαίνει αυτόματα διαφορετική
+        # εταιρεία, οπότε το κουμπί "Κοινή χρήση" στέλνει το password μία
+        # φορά σε άλλο σταθμό μέσω του ίδιου remote, με άμεση διαγραφή μετά
+        # την παραλαβή -- δεν κάθεται μόνιμα εκεί.
+        self.smtp_host = QLineEdit()
+        self.smtp_host.setPlaceholderText("π.χ. smtp.gmail.com")
+        self.smtp_port = QSpinBox()
+        self.smtp_port.setRange(1, 65535)
+        self.smtp_port.setValue(587)
+        self.smtp_email = QLineEdit()
+        self.smtp_email.setPlaceholderText("λογαριασμός αποστολής")
+        self.smtp_password = QLineEdit()
+        self.smtp_password.setEchoMode(QLineEdit.Password)
+        share_btn = QPushButton("Κοινή χρήση password σε άλλο σταθμό...")
+        share_btn.clicked.connect(self._share_smtp_password)
+
+        smtp_form = QFormLayout()
+        smtp_form.addRow("SMTP server:", self.smtp_host)
+        smtp_form.addRow("Θύρα:", self.smtp_port)
+        smtp_form.addRow("Λογαριασμός:", self.smtp_email)
+        smtp_form.addRow("Κωδικός (app password):", self.smtp_password)
+        smtp_form.addRow("", share_btn)
+        smtp_box = QGroupBox("Αποστολή email (SMTP) -- προαιρετικό, τοπικό ανά σταθμό")
+        smtp_box.setLayout(smtp_form)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(smtp_box)
+        self.setLayout(layout)
 
         for w in (self.name, self.subtitle, self.address, self.ids, self.email):
             w.textChanged.connect(self.completeChanged)
@@ -112,6 +155,27 @@ class CompanyPage(QWizardPage):
         )
         if path:
             self.signature_path_edit.setText(path)
+
+    def _share_smtp_password(self):
+        name = self.name.text().strip()
+        if not name:
+            return
+        if not self.smtp_password.text():
+            QMessageBox.warning(self, "Δεν υπάρχει κωδικός", "Συμπλήρωσε πρώτα τον κωδικό SMTP.")
+            return
+        # αποθηκεύουμε πρώτα τοπικά ό,τι φαίνεται στη φόρμα, ώστε το μοίρασμα
+        # να στείλει ακριβώς αυτό που βλέπει ο χρήστης
+        self.validatePage()
+        result = syncmod.share_smtp_password(DB, name)
+        if result.get("ok"):
+            QMessageBox.information(
+                self, "Έγινε το μοίρασμα",
+                "Ο κωδικός ανέβηκε μία φορά -- θα παραληφθεί αυτόματα και θα "
+                "διαγραφεί από το remote στο επόμενο άνοιγμα της εφαρμογής σε άλλο "
+                "σταθμό που ξέρει ήδη αυτή την εταιρεία.",
+            )
+        else:
+            QMessageBox.critical(self, "Σφάλμα", result.get("error", "Άγνωστο σφάλμα"))
 
     def _import_from_pdf(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -153,6 +217,10 @@ class CompanyPage(QWizardPage):
             self._default_round_step = None
             self._output_dir = None
             self.signature_path_edit.setText("")
+            self.smtp_host.setText("")
+            self.smtp_port.setValue(587)
+            self.smtp_email.setText("")
+            self.smtp_password.setText("")
             return
         row = next((r for r in dbmod.list_companies(DB) if r["id"] == company_id), None)
         if row is None:
@@ -165,6 +233,10 @@ class CompanyPage(QWizardPage):
         self.receipt_prefix.setText(row["receipt_prefix"] or "ΧΑΕ-")
         self.receipt_padding.setValue(row["receipt_padding"] or 4)
         self.signature_path_edit.setText(row["signature_path"] or "")
+        self.smtp_host.setText(row["smtp_host"] or "")
+        self.smtp_port.setValue(row["smtp_port"] or 587)
+        self.smtp_email.setText(row["smtp_email"] or "")
+        self.smtp_password.setText(row["smtp_password"] or "")
         self._default_cap = row["default_cap"]
         self._default_round_step = row["default_round_step"]
         self._output_dir = row["output_dir"]
@@ -185,6 +257,10 @@ class CompanyPage(QWizardPage):
         wiz.default_round_step = self._default_round_step
         wiz.signature_path = self.signature_path_edit.text().strip() or None
         wiz.output_dir = self._output_dir
+        wiz.smtp_host = self.smtp_host.text().strip() or None
+        wiz.smtp_port = self.smtp_port.value()
+        wiz.smtp_email = self.smtp_email.text().strip() or None
+        wiz.smtp_password = self.smtp_password.text() or None
         wiz.company_id = self._company_id
 
         wiz.save_company()
@@ -269,10 +345,10 @@ class LedgerPage(QWizardPage):
 
         if ledger.balance_check_ok:
             self.status_label.setText("✓ Το υπόλοιπο ταιριάζει σε κάθε γραμμή της καρτέλας")
-            self.status_label.setStyleSheet("font-weight: bold; color: #0a7a2f;")
+            self.status_label.setStyleSheet(f"font-weight: bold; color: {STATUS_OK_COLOR};")
         else:
             self.status_label.setText("✗ ΑΣΥΜΦΩΝΙΑ υπολοίπου -- έλεγξε χειροκίνητα πριν προχωρήσεις!")
-            self.status_label.setStyleSheet("font-weight: bold; color: #b00020;")
+            self.status_label.setStyleSheet(f"font-weight: bold; color: {STATUS_DANGER_COLOR};")
 
         self.summary_label.setText(
             f"Πελάτης/Προμηθευτής: {ledger.customer_name}  (ΑΦΜ {ledger.customer_afm})   "
@@ -600,7 +676,7 @@ class PreviewPage(QWizardPage):
 
         self.warnings_label = QLabel("")
         self.warnings_label.setWordWrap(True)
-        self.warnings_label.setStyleSheet("color: #b00020; font-weight: bold;")
+        self.warnings_label.setStyleSheet(f"color: {STATUS_DANGER_COLOR}; font-weight: bold;")
         self.ack_checkbox = QCheckBox("Το κατάλαβα, συνέχισε ούτως ή άλλως")
         self.ack_checkbox.toggled.connect(self.completeChanged)
 
@@ -706,12 +782,30 @@ class GeneratePage(QWizardPage):
         self.pdf_view.setPageMode(QPdfView.PageMode.SinglePage)
         self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
 
+        self.print_btn = QPushButton("Εκτύπωση επιλεγμένου")
+        self.print_btn.clicked.connect(self._print_selected)
+
+        pdf_col = QVBoxLayout()
+        pdf_col.addWidget(self.pdf_list)
+        pdf_col.addWidget(self.print_btn)
+
         self.preview_box = QGroupBox("Προεπισκόπηση")
         preview_layout = QHBoxLayout()
-        preview_layout.addWidget(self.pdf_list)
+        preview_layout.addLayout(pdf_col)
         preview_layout.addWidget(self.pdf_view, 1)
         self.preview_box.setLayout(preview_layout)
         self.preview_box.setVisible(False)
+
+        self.email_to = QLineEdit()
+        self.email_to.setPlaceholderText("email παραλήπτη")
+        email_btn = QPushButton("Αποστολή με email (όλα τα PDF)")
+        email_btn.clicked.connect(self._send_email)
+        email_row = QHBoxLayout()
+        email_row.addWidget(self.email_to)
+        email_row.addWidget(email_btn)
+        self.email_box = QGroupBox("Αποστολή email")
+        self.email_box.setLayout(email_row)
+        self.email_box.setVisible(False)
 
         layout = QVBoxLayout()
         layout.addWidget(browse_btn)
@@ -720,11 +814,41 @@ class GeneratePage(QWizardPage):
         layout.addWidget(self.result_label)
         layout.addWidget(self.open_folder_btn)
         layout.addWidget(self.preview_box, 1)
+        layout.addWidget(self.email_box)
         self.setLayout(layout)
 
         self._out_dir = None
         self._done = False
         self._generated_paths: list[str] = []
+
+    def _print_selected(self):
+        row = self.pdf_list.currentRow()
+        if row < 0 or row >= len(self._generated_paths):
+            QMessageBox.warning(self, "Δεν επιλέχθηκε PDF", "Επίλεξε πρώτα ένα PDF από τη λίστα.")
+            return
+        path = self._generated_paths[row]
+        if sys.platform == "win32":
+            os.startfile(path, "print")  # noqa: S606
+        else:
+            QMessageBox.warning(self, "Μη υποστηριζόμενο", "Η εκτύπωση υποστηρίζεται μόνο σε Windows.")
+
+    def _send_email(self):
+        wiz = self.wizard()
+        to_addr = self.email_to.text().strip()
+        if not self._generated_paths:
+            return
+        result = email_sender.send_receipt_email(
+            smtp_host=wiz.smtp_host, smtp_port=wiz.smtp_port,
+            smtp_email=wiz.smtp_email, smtp_password=wiz.smtp_password,
+            to_addr=to_addr,
+            subject=f"Αποδείξεις -- {wiz.ledger.customer_name}",
+            body=f"Επισυνάπτονται {len(self._generated_paths)} απόδειξη/εις για {wiz.ledger.customer_name}.",
+            attachments=self._generated_paths,
+        )
+        if result.get("ok"):
+            QMessageBox.information(self, "Στάλθηκε", f"Το email στάλθηκε στο {to_addr}.")
+        else:
+            QMessageBox.critical(self, "Σφάλμα αποστολής", result.get("error", "Άγνωστο σφάλμα"))
 
     def _show_preview(self, row: int):
         if row < 0 or row >= len(self._generated_paths):
@@ -807,6 +931,7 @@ class GeneratePage(QWizardPage):
         )
         self.open_folder_btn.setVisible(True)
         self.preview_box.setVisible(True)
+        self.email_box.setVisible(True)
         self.pdf_list.setCurrentRow(0)
         self.completeChanged.emit()
 
@@ -836,6 +961,10 @@ class ReceiptWizard(QWizard):
         self.default_round_step = None
         self.signature_path = None
         self.output_dir = None
+        self.smtp_host = None
+        self.smtp_port = None
+        self.smtp_email = None
+        self.smtp_password = None
 
         self.setPage(PAGE_COMPANY, CompanyPage())
         self.setPage(PAGE_LEDGER, LedgerPage())
@@ -858,6 +987,8 @@ class ReceiptWizard(QWizard):
             receipt_prefix=self.receipt_prefix, receipt_padding=self.receipt_padding,
             default_cap=self.default_cap, default_round_step=self.default_round_step,
             signature_path=self.signature_path, output_dir=self.output_dir,
+            smtp_host=self.smtp_host, smtp_port=self.smtp_port,
+            smtp_email=self.smtp_email, smtp_password=self.smtp_password,
         )
         return self.company_id
 
@@ -945,27 +1076,124 @@ class HistoryDialog(QDialog):
         QApplication.clipboard().setText(", ".join(codes))
 
 
+class SyncSettingsDialog(QDialog):
+    """Ρύθμιση του rclone remote (π.χ. mega:AIReceipts) που χρησιμοποιείται
+    για sync μεταξύ σταθμών εργασίας -- βλ. core/sync.py. Χρειάζεται ήδη
+    ρυθμισμένο rclone remote στο σύστημα (`rclone config`)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Ρυθμίσεις συγχρονισμού")
+        self.resize(440, 160)
+
+        self.remote_edit = QLineEdit(syncmod.get_remote_path())
+        save_btn = QPushButton("Αποθήκευση")
+        save_btn.clicked.connect(self._save)
+
+        form = QFormLayout()
+        form.addRow("Remote (rclone):", self.remote_edit)
+
+        info = QLabel(
+            "π.χ. mega:AIReceipts ή gdrive:AIReceipts -- πρέπει να υπάρχει ήδη "
+            "ρυθμισμένο rclone remote σε αυτό το μηχάνημα (`rclone config` σε "
+            "τερματικό). Εδώ ορίζεται μόνο ο υποφάκελος που θα χρησιμοποιήσει "
+            "το AIReceipts."
+        )
+        info.setWordWrap(True)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(info)
+        layout.addWidget(save_btn)
+        self.setLayout(layout)
+
+    def _save(self):
+        syncmod.save_remote_path(self.remote_edit.text().strip())
+        self.accept()
+
+
 class LauncherWindow(QWidget):
-    """Πρώτο παράθυρο -- επιλογή μεταξύ νέας απόδειξης (wizard) και
-    ιστορικού (HistoryDialog)."""
+    """Πρώτο παράθυρο -- sync στο άνοιγμα (pull+merge manifests, heartbeat),
+    presence badge (ποιος άλλος είναι ενεργός τώρα -- προειδοποίηση, όχι
+    lock, βλ. core/sync.py), και επιλογή μεταξύ νέας απόδειξης/ιστορικού/
+    ρυθμίσεων συγχρονισμού."""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Αiποδείξεις")
-        self.resize(320, 140)
+        self.resize(360, 260)
+
+        self.presence_label = QLabel("")
+        self.presence_label.setAlignment(Qt.AlignCenter)
+        self.presence_label.setWordWrap(True)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: #6b7a99;")
 
         new_btn = QPushButton("Νέα απόδειξη...")
         new_btn.clicked.connect(self._new_receipt)
         history_btn = QPushButton("Ιστορικό...")
         history_btn.clicked.connect(self._show_history)
+        sync_btn = QPushButton("Συγχρονισμός τώρα")
+        sync_btn.clicked.connect(self._run_startup_sync)
+        settings_btn = QPushButton("Ρυθμίσεις συγχρονισμού...")
+        settings_btn.clicked.connect(self._show_sync_settings)
 
         layout = QVBoxLayout()
+        layout.addWidget(self.presence_label)
         layout.addWidget(new_btn)
         layout.addWidget(history_btn)
+        layout.addWidget(sync_btn)
+        layout.addWidget(settings_btn)
+        layout.addWidget(self.status_label)
         self.setLayout(layout)
 
         self._wizard = None
         self._history = None
+        self._sync_dialog = None
+
+        self._run_startup_sync()
+
+    def _run_startup_sync(self):
+        self.status_label.setText("Συγχρονισμός...")
+        QApplication.processEvents()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            result = syncmod.sync_startup(DB)
+            presence.send_heartbeat()
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if result.get("skipped"):
+            self.status_label.setText("")
+        elif result.get("ok"):
+            self.status_label.setText(
+                f"Sync OK -- {result.get('machines', 0)} μηχανήματα, "
+                f"{result.get('receipt_runs', 0)} νέες αποδείξεις, "
+                f"{result.get('companies', 0)} εταιρείες ενημερώθηκαν."
+            )
+        elif result.get("no_internet"):
+            self.status_label.setText("Χωρίς σύνδεση -- εργασία με τοπικά δεδομένα.")
+        else:
+            self.status_label.setText(f"Σφάλμα συγχρονισμού: {result.get('error', '')}")
+        self._refresh_presence()
+
+    def _refresh_presence(self):
+        others = presence.list_presence()
+        if others:
+            names = ", ".join(f"{o['user']}@{o['computer']}" for o in others)
+            self.presence_label.setText(f"⚠ Ενεργός τώρα και: {names}")
+            self.presence_label.setStyleSheet(
+                f"background: {STATUS_DANGER_BG}; border: 1px solid {STATUS_DANGER_BORDER}; "
+                f"color: {STATUS_DANGER_COLOR}; font-weight: bold; padding: 6px; border-radius: 6px;"
+            )
+        else:
+            self.presence_label.setText("✓ Κανείς άλλος ενεργός αυτή τη στιγμή")
+            self.presence_label.setStyleSheet(
+                f"background: {STATUS_OK_BG}; border: 1px solid {STATUS_OK_BORDER}; "
+                f"color: {STATUS_OK_COLOR}; font-weight: bold; padding: 6px; border-radius: 6px;"
+            )
 
     def _new_receipt(self):
         self._wizard = ReceiptWizard()
@@ -975,11 +1203,46 @@ class LauncherWindow(QWidget):
         self._history = HistoryDialog(self)
         self._history.show()
 
+    def _show_sync_settings(self):
+        self._sync_dialog = SyncSettingsDialog(self)
+        self._sync_dialog.exec()
+
+
+def _sync_on_quit():
+    try:
+        syncmod.sync_shutdown(DB)
+    except Exception:  # noqa: BLE001 -- η εφαρμογή κλείνει ούτως ή άλλως,
+        pass            # ένα αποτυχημένο sync δεν πρέπει να την μπλοκάρει
+
+
+def _assets_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        # PyInstaller: datas bundled στο _MEIPASS (ή δίπλα στο .exe σε onedir) --
+        # βλ. AIReceipts.spec. Διαφορετικό κανόνα από core.db.DB_PATH επίτηδες:
+        # τα fonts είναι read-only bundled δεδομένα, όχι εγγράψιμη κατάσταση.
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)) / "assets"
+    return Path(__file__).resolve().parent.parent / "assets"
+
+
+def _load_app_font(app: QApplication) -> None:
+    """Ίδια γραμματοσειρά (IBM Plex Sans) με τα αδερφά projects
+    (expvault/lab-galatista) -- βλ. lab-galatista/fonts/. Αν τα αρχεία
+    λείπουν για οποιονδήποτε λόγο, το Qt απλά πέφτει στο default του
+    συστήματος -- δεν μπλοκάρει την εκκίνηση."""
+    font_dir = _assets_dir() / "fonts"
+    for fname in ("IBMPlexSans-Regular.ttf", "IBMPlexSans-Bold.ttf"):
+        path = font_dir / fname
+        if path.exists():
+            QFontDatabase.addApplicationFont(str(path))
+    app.setFont(QFont("IBM Plex Sans", 10))
+
 
 def main():
     app = QApplication(sys.argv)
+    _load_app_font(app)
     win = LauncherWindow()
     win.show()
+    app.aboutToQuit.connect(_sync_on_quit)
     sys.exit(app.exec())
 
 

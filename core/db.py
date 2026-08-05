@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import sys
 import sqlite3
+import uuid as _uuid
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 if getattr(sys, "frozen", False):
     # PyInstaller: __file__ θα έδειχνε στον προσωρινό φάκελο εξαγωγής
@@ -32,14 +38,20 @@ CREATE TABLE IF NOT EXISTS companies (
     default_cap REAL,
     default_round_step REAL,
     signature_path TEXT,
-    output_dir TEXT
+    output_dir TEXT,
+    smtp_host TEXT,
+    smtp_port INTEGER,
+    smtp_email TEXT,
+    smtp_password TEXT,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS contacts (
     afm TEXT PRIMARY KEY,
     name TEXT,
     occupation TEXT,
-    address TEXT
+    address TEXT,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS opening_breakdowns (
@@ -48,11 +60,13 @@ CREATE TABLE IF NOT EXISTS opening_breakdowns (
     code TEXT NOT NULL,
     date TEXT NOT NULL,
     amount REAL NOT NULL,
+    updated_at TEXT,
     PRIMARY KEY (contact_afm, seq)
 );
 
 CREATE TABLE IF NOT EXISTS receipt_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT UNIQUE,
     company_id INTEGER NOT NULL REFERENCES companies(id),
     contact_afm TEXT,
     seira TEXT NOT NULL DEFAULT '',
@@ -63,7 +77,8 @@ CREATE TABLE IF NOT EXISTS receipt_runs (
     receipt_no_start INTEGER NOT NULL,
     receipt_no_end INTEGER NOT NULL,
     out_dir TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    source_machine TEXT
 );
 """
 
@@ -72,11 +87,39 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """Προσθέτει στήλες σε ήδη υπάρχον app_data.db από παλιότερη έκδοση του
     schema -- το CREATE TABLE IF NOT EXISTS παραπάνω δεν αγγίζει πίνακες που
     ήδη υπάρχουν."""
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(companies)")}
-    if "signature_path" not in cols:
+    companies_cols = {row["name"] for row in conn.execute("PRAGMA table_info(companies)")}
+    if "signature_path" not in companies_cols:
         conn.execute("ALTER TABLE companies ADD COLUMN signature_path TEXT")
-    if "output_dir" not in cols:
+    if "output_dir" not in companies_cols:
         conn.execute("ALTER TABLE companies ADD COLUMN output_dir TEXT")
+    if "updated_at" not in companies_cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN updated_at TEXT")
+    if "smtp_host" not in companies_cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN smtp_host TEXT")
+    if "smtp_port" not in companies_cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN smtp_port INTEGER")
+    if "smtp_email" not in companies_cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN smtp_email TEXT")
+    if "smtp_password" not in companies_cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN smtp_password TEXT")
+
+    contacts_cols = {row["name"] for row in conn.execute("PRAGMA table_info(contacts)")}
+    if "updated_at" not in contacts_cols:
+        conn.execute("ALTER TABLE contacts ADD COLUMN updated_at TEXT")
+
+    opening_cols = {row["name"] for row in conn.execute("PRAGMA table_info(opening_breakdowns)")}
+    if "updated_at" not in opening_cols:
+        conn.execute("ALTER TABLE opening_breakdowns ADD COLUMN updated_at TEXT")
+
+    runs_cols = {row["name"] for row in conn.execute("PRAGMA table_info(receipt_runs)")}
+    if "uuid" not in runs_cols:
+        conn.execute("ALTER TABLE receipt_runs ADD COLUMN uuid TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS receipt_runs_uuid_idx "
+            "ON receipt_runs(uuid) WHERE uuid IS NOT NULL"
+        )
+    if "source_machine" not in runs_cols:
+        conn.execute("ALTER TABLE receipt_runs ADD COLUMN source_machine TEXT")
     conn.commit()
 
 
@@ -108,18 +151,29 @@ def upsert_company(
     default_round_step: float,
     signature_path: str | None = None,
     output_dir: str | None = None,
+    smtp_host: str | None = None,
+    smtp_port: int | None = None,
+    smtp_email: str | None = None,
+    smtp_password: str | None = None,
 ) -> int:
     """Insert ή update -- αν δοθεί company_id ενημερώνει εκείνη τη γραμμή,
     αλλιώς κάνει upsert στο μοναδικό name (νέα εταιρεία ή ίδιο όνομα με
-    πριν)."""
+    πριν). Τα smtp_* (όπως και signature_path/output_dir) είναι σκόπιμα
+    τοπικά ανά σταθμό εργασίας -- core/sync.py::_merge_company δεν τα
+    αγγίζει, και core/sync.py::export_manifest δεν τα συμπεριλαμβάνει καν
+    στο ανεβασμένο manifest (κωδικός SMTP σε plaintext στο cloud θα ήταν
+    πραγματικό ρίσκο)."""
+    now = _now()
     if company_id is not None:
         conn.execute(
             """UPDATE companies SET name=?, subtitle=?, address_line=?, ids_line=?,
                email=?, receipt_prefix=?, receipt_padding=?, default_cap=?,
-               default_round_step=?, signature_path=?, output_dir=? WHERE id=?""",
+               default_round_step=?, signature_path=?, output_dir=?, smtp_host=?,
+               smtp_port=?, smtp_email=?, smtp_password=?, updated_at=?
+               WHERE id=?""",
             (name, subtitle, address_line, ids_line, email, receipt_prefix,
              receipt_padding, default_cap, default_round_step, signature_path,
-             output_dir, company_id),
+             output_dir, smtp_host, smtp_port, smtp_email, smtp_password, now, company_id),
         )
         conn.commit()
         return company_id
@@ -128,8 +182,8 @@ def upsert_company(
         """INSERT INTO companies
                (name, subtitle, address_line, ids_line, email, receipt_prefix,
                 receipt_padding, default_cap, default_round_step, signature_path,
-                output_dir)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_dir, smtp_host, smtp_port, smtp_email, smtp_password, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(name) DO UPDATE SET
                subtitle=excluded.subtitle, address_line=excluded.address_line,
                ids_line=excluded.ids_line, email=excluded.email,
@@ -138,10 +192,14 @@ def upsert_company(
                default_cap=excluded.default_cap,
                default_round_step=excluded.default_round_step,
                signature_path=excluded.signature_path,
-               output_dir=excluded.output_dir
+               output_dir=excluded.output_dir,
+               smtp_host=excluded.smtp_host, smtp_port=excluded.smtp_port,
+               smtp_email=excluded.smtp_email, smtp_password=excluded.smtp_password,
+               updated_at=excluded.updated_at
            RETURNING id""",
         (name, subtitle, address_line, ids_line, email, receipt_prefix,
-         receipt_padding, default_cap, default_round_step, signature_path, output_dir),
+         receipt_padding, default_cap, default_round_step, signature_path, output_dir,
+         smtp_host, smtp_port, smtp_email, smtp_password, now),
     ).fetchone()
     conn.commit()
     return row["id"]
@@ -157,10 +215,11 @@ def upsert_contact(conn: sqlite3.Connection, *, afm: str, name: str, occupation:
     if not afm or afm == "-":
         return
     conn.execute(
-        """INSERT INTO contacts (afm, name, occupation, address) VALUES (?, ?, ?, ?)
+        """INSERT INTO contacts (afm, name, occupation, address, updated_at) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(afm) DO UPDATE SET
-               name=excluded.name, occupation=excluded.occupation, address=excluded.address""",
-        (afm, name, occupation, address),
+               name=excluded.name, occupation=excluded.occupation, address=excluded.address,
+               updated_at=excluded.updated_at""",
+        (afm, name, occupation, address, _now()),
     )
     conn.commit()
 
@@ -194,10 +253,12 @@ def save_opening_breakdown(
     προηγούμενη αποθηκευμένη ανάλυση."""
     if not afm or afm == "-":
         return
+    now = _now()
     conn.execute("DELETE FROM opening_breakdowns WHERE contact_afm=?", (afm,))
     conn.executemany(
-        "INSERT INTO opening_breakdowns (contact_afm, seq, code, date, amount) VALUES (?, ?, ?, ?, ?)",
-        [(afm, i, code, date, amount) for i, (code, date, amount) in enumerate(rows)],
+        """INSERT INTO opening_breakdowns (contact_afm, seq, code, date, amount, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        [(afm, i, code, date, amount, now) for i, (code, date, amount) in enumerate(rows)],
     )
     conn.commit()
 
@@ -205,15 +266,18 @@ def save_opening_breakdown(
 def suggest_next_receipt_no(
     conn: sqlite3.Connection, *, company_id: int | None, seira: str, receipt_prefix: str,
 ) -> int | None:
+    """MAX(receipt_no_end), όχι "τελευταία γραμμή" -- μετά από merge
+    (core/sync.py) οι γραμμές άλλων μηχανημάτων μπαίνουν με τοπικό id που
+    δεν αντιστοιχεί σε χρονική σειρά, οπότε το ORDER BY id θα έδινε λάθος
+    πρόταση."""
     if company_id is None:
         return None
     row = conn.execute(
-        """SELECT receipt_no_end FROM receipt_runs
-           WHERE company_id=? AND seira=? AND receipt_prefix=?
-           ORDER BY id DESC LIMIT 1""",
+        """SELECT MAX(receipt_no_end) AS max_no FROM receipt_runs
+           WHERE company_id=? AND seira=? AND receipt_prefix=?""",
         (company_id, seira, receipt_prefix),
     ).fetchone()
-    return (row["receipt_no_end"] + 1) if row else None
+    return (row["max_no"] + 1) if row and row["max_no"] is not None else None
 
 
 def record_receipt_run(
@@ -230,13 +294,16 @@ def record_receipt_run(
     receipt_no_end: int,
     out_dir: str,
     created_at: str,
+    source_machine: str | None = None,
 ) -> None:
     conn.execute(
         """INSERT INTO receipt_runs
-               (company_id, contact_afm, seira, receipt_prefix, receipt_padding,
-                direction, amount, receipt_no_start, receipt_no_end, out_dir, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (company_id, contact_afm, seira, receipt_prefix, receipt_padding,
-         direction, amount, receipt_no_start, receipt_no_end, out_dir, created_at),
+               (uuid, company_id, contact_afm, seira, receipt_prefix, receipt_padding,
+                direction, amount, receipt_no_start, receipt_no_end, out_dir, created_at,
+                source_machine)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (_uuid.uuid4().hex, company_id, contact_afm, seira, receipt_prefix, receipt_padding,
+         direction, amount, receipt_no_start, receipt_no_end, out_dir, created_at,
+         source_machine),
     )
     conn.commit()
