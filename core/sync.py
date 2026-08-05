@@ -370,7 +370,11 @@ def sync_shutdown(conn) -> dict:
             continue
         dest = f"{remote}/pdf/{sanitize(company['name'])}"
         r = run_rclone(
-            ["copy", company["output_dir"], dest, "--checksum", "--create-empty-src-dirs"],
+            # --include *.pdf/*.csv -- άμυνα αν το output_dir δεν είναι
+            # αποκλειστικός φάκελος αποδείξεων (π.χ. έχει κι άλλα αρχεία
+            # μέσα), ώστε να μην ανέβει ό,τι τύχει να υπάρχει εκεί.
+            ["copy", company["output_dir"], dest, "--checksum", "--create-empty-src-dirs",
+             "--include", "*.pdf", "--include", "*.csv"],
             timeout=180,
         )
         pdf_results.append({"company": company["name"], "ok": r["ok"], "error": r.get("error")})
