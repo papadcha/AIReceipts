@@ -8,7 +8,7 @@ bookkeeping does.
 
 Usage as a library:
     from core.ledger_parser import parse_ledger
-    ledger = parse_ledger("ΠΕΛΑΤΗΣ.pdf")
+    ledger = parse_ledger("karteles.pdf")
     ledger.open_invoices   -> list[OpenInvoice]
     ledger.total_open      -> float
     ledger.customer_name   -> str

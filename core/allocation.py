@@ -71,9 +71,8 @@ def allocate_receipts(open_invoices, amount: float, cap: float, round_step: floa
       καθόλου partial (κλείνει την απόδειξη μόνο με ό,τι έκλεισε).
     - Η ΤΕΛΕΥΤΑΙΑ απόδειξη (αυτή που καλύπτει ό,τι απομένει από το συνολικό
       ζητούμενο ποσό) παίρνει ακριβώς το υπόλοιπο, χωρίς στρογγυλοποίηση.
-    Επαληθεύτηκε ότι αναπαράγει ακριβώς τις πραγματικές αποδείξεις
-    πραγματικές αποδείξεις πάνω στα ίδια ανοιχτά
-    τιμολόγια.
+    Επαληθεύτηκε ότι αναπαράγει ακριβώς πραγματικές αποδείξεις πάνω σε
+    πραγματικά δεδομένα καρτέλας.
     Returns list of dicts: {amount, closed:[(code,date)], partial:(code,date)|None, overflow:bool}
     """
     queue = [[inv.label, inv.date, inv.remaining] for inv in open_invoices]
