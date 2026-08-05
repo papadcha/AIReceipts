@@ -38,10 +38,18 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 from core import db as dbmod
+
+# rclone.exe είναι console app -- χωρίς αυτό, κάθε κλήση ανοιγοκλείνει ένα
+# ορατό console παράθυρο πίσω από το (windowed, χωρίς console) GUI μας.
+# Στο άνοιγμα της εφαρμογής γίνονται αρκετές τέτοιες κλήσεις πίσω-πίσω
+# (manifests, smtp-credentials, heartbeat, pdf pull) -- εξ ου και το
+# αισθητό "flash" παραθύρου πολλές φορές.
+_SUBPROCESS_KWARGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 RCLONE_BIN = os.environ.get("AIRECEIPTS_RCLONE_PATH") or "rclone"
 DEFAULT_REMOTE = "mega:AIReceipts"
@@ -120,6 +128,7 @@ def run_rclone(args: list[str], timeout: int = 30) -> dict:
     try:
         proc = subprocess.run(
             [RCLONE_BIN, *args], capture_output=True, text=True, timeout=timeout,
+            **_SUBPROCESS_KWARGS,
         )
     except FileNotFoundError:
         return {"ok": False, "error": "Το rclone δεν βρέθηκε στο PATH"}

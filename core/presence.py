@@ -67,13 +67,13 @@ def send_heartbeat() -> dict:
     return {"ok": True, "path": dest}
 
 
-def list_presence(exclude_self: bool = True) -> list[dict]:
+def list_presence(exclude_self: bool = True, timeout: int = 60) -> list[dict]:
     remote_dir = _remote_dir()
     if remote_dir is None:
         return []
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        r = syncmod.run_rclone(["copy", remote_dir, tmp_dir, "--include", "*.json"], timeout=60)
+        r = syncmod.run_rclone(["copy", remote_dir, tmp_dir, "--include", "*.json"], timeout=timeout)
         if not r["ok"]:
             # π.χ. presence/ δεν υπάρχει ακόμα -- καμία εγκατάσταση δεν έχει
             # στείλει heartbeat ποτέ -- άδεια λίστα, όχι σφάλμα

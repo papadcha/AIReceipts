@@ -7,12 +7,11 @@ from __future__ import annotations
 
 import csv
 import os
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
@@ -975,6 +974,24 @@ class ReceiptWizard(QWizard):
         self.setPage(PAGE_GENERATE, GeneratePage())
         self.setStartId(PAGE_COMPANY)
 
+        # Presence στον τίτλο του παραθύρου, όχι μόνο στο launcher -- ώστε
+        # να είναι ορατό σε ΚΑΘΕ βήμα του wizard (ιδίως στις Ημερομηνίες,
+        # όπου γίνεται η αρίθμηση), όχι μόνο πριν ανοίξει κανείς το wizard.
+        # Timeout κοντό (8s) ώστε μια αργή σύνδεση να μην παγώνει το UI για
+        # πολύ κάθε φορά που τρέχει ο timer.
+        self._presence_timer = QTimer(self)
+        self._presence_timer.timeout.connect(self._refresh_presence_title)
+        self._presence_timer.start(60_000)
+        self._refresh_presence_title()
+
+    def _refresh_presence_title(self):
+        others = presence.list_presence(timeout=8)
+        if others:
+            names = ", ".join(f"{o['user']}@{o['computer']}" for o in others)
+            self.setWindowTitle(f"Αiποδείξεις -- ⚠ Ενεργός τώρα και: {names}")
+        else:
+            self.setWindowTitle("Αiποδείξεις")
+
     def save_company(self):
         """Upsert στο companies row βάσει της τρέχουσας κατάστασης του
         wizard -- καλείται από κάθε βήμα που ενημερώνει κάτι στην εταιρεία
@@ -1247,7 +1264,7 @@ def _load_app_font(app: QApplication) -> None:
         path = font_dir / fname
         if path.exists():
             QFontDatabase.addApplicationFont(str(path))
-    app.setFont(QFont("IBM Plex Sans", 10))
+    app.setFont(QFont("IBM Plex Sans", 11))
 
 
 def main():
