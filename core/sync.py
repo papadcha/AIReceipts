@@ -51,19 +51,42 @@ def _config_path() -> Path:
     return dbmod.DB_PATH.parent / "sync_config.json"
 
 
-def get_remote_path() -> str:
+def _load_config() -> dict:
     path = _config_path()
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data.get("remote_path") or DEFAULT_REMOTE
-        except (OSError, ValueError):
-            return DEFAULT_REMOTE
-    return DEFAULT_REMOTE
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_config(**updates) -> None:
+    cfg = _load_config()
+    cfg.update(updates)
+    _config_path().write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+
+
+def get_remote_path() -> str:
+    return _load_config().get("remote_path") or DEFAULT_REMOTE
 
 
 def save_remote_path(remote_path: str) -> None:
-    _config_path().write_text(json.dumps({"remote_path": remote_path}), encoding="utf-8")
+    _save_config(remote_path=remote_path)
+
+
+def is_main_machine() -> bool:
+    """Τοπική ρύθμιση ανά σταθμό -- ΔΕΝ συγχρονίζεται. Ο "main" υπολογιστής
+    (συγκεκριμένο φυσικό μηχάνημα, π.χ. του γραφείου) είναι αυτός στον
+    οποίο καταλήγουν τοπικά (pull-down, βλ. pull_pdfs) τα PDF όλων των
+    σταθμών, ανά εταιρεία, μέσα στο ήδη υπάρχον output_dir της -- ώστε να
+    υπάρχει μία πραγματική θέση με όλα τα PDF μιας εταιρείας, όχι μόνο στο
+    cloud."""
+    return bool(_load_config().get("is_main"))
+
+
+def set_main_machine(value: bool) -> None:
+    _save_config(is_main=bool(value))
 
 
 def sanitize(name: str) -> str:
@@ -84,6 +107,13 @@ def _hostname() -> str:
 
 def is_network_error(error: str | None) -> bool:
     return bool(re.search(r"network|connect|timeout|unreachable|no route", error or "", re.I))
+
+
+def is_missing_dir_error(error: str | None) -> bool:
+    """True όταν το rclone απέτυχε επειδή ο φάκελος-πηγή δεν υπάρχει ακόμα
+    -- φυσιολογικό στην πρώτη ποτέ χρήση (κανένα μηχάνημα δεν έχει κάνει
+    ακόμα sync), όχι πραγματικό σφάλμα."""
+    return bool(re.search(r"directory not found", error or "", re.I))
 
 
 def run_rclone(args: list[str], timeout: int = 30) -> dict:
@@ -323,12 +353,12 @@ def sync_startup(conn) -> dict:
     εφαρμογή."""
     remote = get_remote_path()
     manifests_dir = f"{remote.rstrip('/')}/manifests"
+    stats = {"companies": 0, "contacts": 0, "receipt_runs": 0, "opening_breakdowns": 0}
+    machines = 0
     with tempfile.TemporaryDirectory() as tmp:
         r = run_rclone(["copy", manifests_dir, tmp, "--include", "*.json"], timeout=90)
-        if not r["ok"]:
+        if not r["ok"] and not is_missing_dir_error(r["error"]):
             return {"ok": False, "error": r["error"], "no_internet": is_network_error(r["error"])}
-        stats = {"companies": 0, "contacts": 0, "receipt_runs": 0, "opening_breakdowns": 0}
-        machines = 0
         for f in Path(tmp).glob("*.json"):
             try:
                 manifest = json.loads(f.read_text(encoding="utf-8"))
@@ -339,7 +369,34 @@ def sync_startup(conn) -> dict:
                 stats[k] += s[k]
             machines += 1
     smtp_received = _pull_smtp_credentials(conn)
-    return {"ok": True, "machines": machines, "smtp_received": smtp_received, **stats}
+    pdfs_pulled = pull_pdfs(conn) if is_main_machine() else None
+    return {
+        "ok": True, "machines": machines, "smtp_received": smtp_received,
+        "pdfs_pulled": pdfs_pulled, **stats,
+    }
+
+
+def pull_pdfs(conn) -> dict:
+    """Μόνο στο "main" μηχάνημα (is_main_machine): κατεβάζει (rclone copy,
+    additive -- ποτέ delete) τα PDF ΟΛΩΝ των σταθμών, ανά εταιρεία, μέσα
+    στο ήδη υπάρχον output_dir της -- ώστε να υπάρχει μία πραγματική τοπική
+    θέση με όλα τα PDF μιας εταιρείας, όχι μόνο στο cloud."""
+    remote = get_remote_path().rstrip("/")
+    results = {}
+    for company in conn.execute(
+        "SELECT name, output_dir FROM companies WHERE output_dir IS NOT NULL AND output_dir != ''"
+    ):
+        if not os.path.isdir(company["output_dir"]):
+            continue
+        src = f"{remote}/pdf/{sanitize(company['name'])}"
+        r = run_rclone(
+            ["copy", src, company["output_dir"], "--checksum", "--include", "*.pdf", "--include", "*.csv"],
+            timeout=180,
+        )
+        if not r["ok"] and is_missing_dir_error(r["error"]):
+            continue  # κανείς άλλος σταθμός δεν έχει ανεβάσει ακόμα PDF για αυτή την εταιρεία
+        results[company["name"]] = r["ok"]
+    return results
 
 
 def sync_shutdown(conn) -> dict:

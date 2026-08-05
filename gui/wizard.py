@@ -1087,17 +1087,25 @@ class SyncSettingsDialog(QDialog):
         self.resize(440, 160)
 
         self.remote_edit = QLineEdit(syncmod.get_remote_path())
+        self.is_main_checkbox = QCheckBox("Αυτός είναι ο \"main\" υπολογιστής")
+        self.is_main_checkbox.setChecked(syncmod.is_main_machine())
         save_btn = QPushButton("Αποθήκευση")
         save_btn.clicked.connect(self._save)
 
         form = QFormLayout()
         form.addRow("Remote (rclone):", self.remote_edit)
+        form.addRow("", self.is_main_checkbox)
 
         info = QLabel(
             "π.χ. mega:AIReceipts ή gdrive:AIReceipts -- πρέπει να υπάρχει ήδη "
             "ρυθμισμένο rclone remote σε αυτό το μηχάνημα (`rclone config` σε "
             "τερματικό). Εδώ ορίζεται μόνο ο υποφάκελος που θα χρησιμοποιήσει "
-            "το AIReceipts."
+            "το AIReceipts.\n\nΟ \"main\" υπολογιστής είναι το ΕΝΑ συγκεκριμένο "
+            "μηχάνημα (π.χ. του γραφείου) στο οποίο καταλήγουν τοπικά, στο "
+            "άνοιγμα της εφαρμογής, τα PDF ΟΛΩΝ των σταθμών ανά εταιρεία -- "
+            "ώστε να υπάρχει μία πραγματική θέση με όλα τα PDF, όχι μόνο στο "
+            "cloud. Μόνο ένας σταθμός θα πρέπει να έχει αυτό το κουτί "
+            "τσεκαρισμένο."
         )
         info.setWordWrap(True)
 
@@ -1109,6 +1117,7 @@ class SyncSettingsDialog(QDialog):
 
     def _save(self):
         syncmod.save_remote_path(self.remote_edit.text().strip())
+        syncmod.set_main_machine(self.is_main_checkbox.isChecked())
         self.accept()
 
 
@@ -1168,11 +1177,15 @@ class LauncherWindow(QWidget):
         if result.get("skipped"):
             self.status_label.setText("")
         elif result.get("ok"):
-            self.status_label.setText(
+            msg = (
                 f"Sync OK -- {result.get('machines', 0)} μηχανήματα, "
                 f"{result.get('receipt_runs', 0)} νέες αποδείξεις, "
                 f"{result.get('companies', 0)} εταιρείες ενημερώθηκαν."
             )
+            pulled = result.get("pdfs_pulled")
+            if pulled is not None:
+                msg += f" PDF ενημερώθηκαν για {len(pulled)} εταιρείες (main υπολογιστής)."
+            self.status_label.setText(msg)
         elif result.get("no_internet"):
             self.status_label.setText("Χωρίς σύνδεση -- εργασία με τοπικά δεδομένα.")
         else:
