@@ -12,12 +12,14 @@ import sys
 from datetime import datetime
 
 from PySide6.QtCore import QDate, Qt
+from PySide6.QtPdf import QPdfDocument
+from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
     QDateEdit, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QRadioButton, QSpinBox, QTableWidget, QTableWidgetItem, QTextEdit,
-    QVBoxLayout, QWizard, QWizardPage,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMessageBox,
+    QPushButton, QRadioButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QTextEdit, QVBoxLayout, QWizard, QWizardPage,
 )
 
 from core import company_import, db as dbmod
@@ -657,16 +659,40 @@ class GeneratePage(QWizardPage):
         self.open_folder_btn.clicked.connect(self._open_folder)
         self.open_folder_btn.setVisible(False)
 
+        self.pdf_list = QListWidget()
+        self.pdf_list.setMaximumWidth(220)
+        self.pdf_list.currentRowChanged.connect(self._show_preview)
+
+        self.pdf_doc = QPdfDocument(self)
+        self.pdf_view = QPdfView()
+        self.pdf_view.setDocument(self.pdf_doc)
+        self.pdf_view.setPageMode(QPdfView.PageMode.SinglePage)
+        self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+
+        self.preview_box = QGroupBox("Προεπισκόπηση")
+        preview_layout = QHBoxLayout()
+        preview_layout.addWidget(self.pdf_list)
+        preview_layout.addWidget(self.pdf_view, 1)
+        self.preview_box.setLayout(preview_layout)
+        self.preview_box.setVisible(False)
+
         layout = QVBoxLayout()
         layout.addWidget(browse_btn)
         layout.addWidget(self.out_dir_label)
         layout.addWidget(self.generate_btn)
         layout.addWidget(self.result_label)
         layout.addWidget(self.open_folder_btn)
+        layout.addWidget(self.preview_box, 1)
         self.setLayout(layout)
 
         self._out_dir = None
         self._done = False
+        self._generated_paths: list[str] = []
+
+    def _show_preview(self, row: int):
+        if row < 0 or row >= len(self._generated_paths):
+            return
+        self.pdf_doc.load(self._generated_paths[row])
 
     def initializePage(self):
         wiz = self.wizard()
@@ -687,6 +713,8 @@ class GeneratePage(QWizardPage):
         wiz = self.wizard()
         os.makedirs(self._out_dir, exist_ok=True)
         csv_rows = []
+        self._generated_paths = []
+        self.pdf_list.clear()
         receipt_no = wiz.receipt_no_start
         for chunk, date_dt in zip(wiz.plan, wiz.dates):
             date_str = date_dt.strftime("%d/%m/%Y")
@@ -714,6 +742,8 @@ class GeneratePage(QWizardPage):
             out_path = os.path.join(self._out_dir, out_name)
             build_receipt_pdf(out_path, rdata)
             csv_rows.append([date_str, code, f"{chunk['amount']:.2f}", aitiologia, out_name])
+            self._generated_paths.append(out_path)
+            self.pdf_list.addItem(out_name)
             receipt_no += 1
 
         csv_path = os.path.join(self._out_dir, "summary.csv")
@@ -739,6 +769,8 @@ class GeneratePage(QWizardPage):
             f"Δημιουργήθηκαν {len(wiz.plan)} PDF + summary.csv στο:\n{self._out_dir}"
         )
         self.open_folder_btn.setVisible(True)
+        self.preview_box.setVisible(True)
+        self.pdf_list.setCurrentRow(0)
         self.completeChanged.emit()
 
     def _open_folder(self):
