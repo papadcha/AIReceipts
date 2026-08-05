@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS contacts (
     address TEXT
 );
 
+CREATE TABLE IF NOT EXISTS opening_breakdowns (
+    contact_afm TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    date TEXT NOT NULL,
+    amount REAL NOT NULL,
+    PRIMARY KEY (contact_afm, seq)
+);
+
 CREATE TABLE IF NOT EXISTS receipt_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id INTEGER NOT NULL REFERENCES companies(id),
@@ -158,6 +167,31 @@ def list_receipt_runs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
            LEFT JOIN contacts ct ON ct.afm = rr.contact_afm
            ORDER BY rr.id DESC"""
     ).fetchall()
+
+
+def get_opening_breakdown(conn: sqlite3.Connection, afm: str) -> list[sqlite3.Row]:
+    if not afm:
+        return []
+    return conn.execute(
+        "SELECT * FROM opening_breakdowns WHERE contact_afm=? ORDER BY seq", (afm,),
+    ).fetchall()
+
+
+def save_opening_breakdown(
+    conn: sqlite3.Connection, *, afm: str, rows: list[tuple[str, str, float]],
+) -> None:
+    """Αντικαθιστά ολόκληρη την αποθηκευμένη ανάλυση αρχικού υπολοίπου του
+    ΑΦΜ με τη νέα -- δεν καλείται όταν ο πίνακας στο GUI είναι κενός (βλ.
+    AmountPage.validatePage), ώστε μια κενή σελίδα να μη σβήνει κατά λάθος
+    προηγούμενη αποθηκευμένη ανάλυση."""
+    if not afm or afm == "-":
+        return
+    conn.execute("DELETE FROM opening_breakdowns WHERE contact_afm=?", (afm,))
+    conn.executemany(
+        "INSERT INTO opening_breakdowns (contact_afm, seq, code, date, amount) VALUES (?, ?, ?, ?, ?)",
+        [(afm, i, code, date, amount) for i, (code, date, amount) in enumerate(rows)],
+    )
+    conn.commit()
 
 
 def suggest_next_receipt_no(

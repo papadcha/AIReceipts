@@ -440,6 +440,17 @@ class AmountPage(QWizardPage):
             self.round_step.setValue(wiz.default_round_step)
         self._update_preview()
 
+        has_opening_balance = any(inv.label == "ΥΠΟΛΟΙΠΟ ΕΝΑΡΞΗΣ" for inv in ledger.open_invoices)
+        self.opening_table.setRowCount(0)
+        if has_opening_balance:
+            saved = dbmod.get_opening_breakdown(DB, ledger.customer_afm)
+            for r in saved:
+                row = self.opening_table.rowCount()
+                self.opening_table.insertRow(row)
+                self.opening_table.setItem(row, 0, QTableWidgetItem(r["code"]))
+                self.opening_table.setItem(row, 1, QTableWidgetItem(r["date"]))
+                self.opening_table.setItem(row, 2, QTableWidgetItem(fmt_amount(r["amount"])))
+
     def validatePage(self) -> bool:
         wiz = self.wizard()
         wiz.is_payment = self.payment_radio.isChecked()
@@ -490,6 +501,10 @@ class AmountPage(QWizardPage):
                     return False
             others = [inv for inv in wiz.open_invoices if inv.label != "ΥΠΟΛΟΙΠΟ ΕΝΑΡΞΗΣ"]
             wiz.open_invoices = overrides + others
+            dbmod.save_opening_breakdown(
+                DB, afm=wiz.ledger.customer_afm,
+                rows=[(inv.label, inv.date, inv.remaining) for inv in overrides],
+            )
 
         return True
 
