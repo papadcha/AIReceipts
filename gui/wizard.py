@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWizard, QWizardPage,
 )
 
-from core import db as dbmod
+from core import company_import, db as dbmod
 from core.allocation import (
     allocate_receipts, build_aitiologia, linear_dates,
     spread_dates_respecting_invoices,
@@ -61,6 +61,9 @@ class CompanyPage(QWizardPage):
         self._reload_companies()
         self.company_combo.currentIndexChanged.connect(self._on_company_selected)
 
+        import_btn = QPushButton("Εισαγωγή στοιχείων από δείγμα PDF...")
+        import_btn.clicked.connect(self._import_from_pdf)
+
         self.name = QLineEdit()
         self.subtitle = QLineEdit()
         self.address = QLineEdit()
@@ -81,6 +84,7 @@ class CompanyPage(QWizardPage):
 
         form = QFormLayout()
         form.addRow("Αποθηκευμένη εταιρεία:", self.company_combo)
+        form.addRow("", import_btn)
         form.addRow("Επωνυμία:", self.name)
         form.addRow("Υπότιτλος:", self.subtitle)
         form.addRow("Διεύθυνση/τηλ.:", self.address)
@@ -106,6 +110,30 @@ class CompanyPage(QWizardPage):
         )
         if path:
             self.signature_path_edit.setText(path)
+
+    def _import_from_pdf(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Επιλογή δείγματος απόδειξης PDF", "", "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        try:
+            fields = company_import.extract_company_header(path)
+        except Exception as exc:  # noqa: BLE001 -- εμφανές μήνυμα στο χρήστη
+            QMessageBox.critical(self, "Σφάλμα ανάγνωσης", f"Δεν διαβάστηκε το PDF:\n{exc}")
+            return
+        if not any(fields.values()):
+            QMessageBox.warning(
+                self, "Καμία κεφαλίδα δεν αναγνωρίστηκε",
+                "Δεν βρέθηκαν στοιχεία εταιρείας πριν τον τίτλο της απόδειξης σε αυτό "
+                "το PDF -- συμπλήρωσε τα πεδία χειροκίνητα.",
+            )
+            return
+        self.name.setText(fields["name"])
+        self.subtitle.setText(fields["subtitle"])
+        self.address.setText(fields["address_line"])
+        self.ids.setText(fields["ids_line"])
+        self.email.setText(fields["email"])
 
     def _reload_companies(self):
         self.company_combo.blockSignals(True)
