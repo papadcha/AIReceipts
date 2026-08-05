@@ -218,6 +218,18 @@ class LedgerPage(QWizardPage):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
+        self.exclude_edit = QLineEdit()
+        self.exclude_edit.setPlaceholderText(
+            "π.χ. ΧΑΕ-0340, ΧΑΕ-0341 -- αγνοούνται σαν να μην είχαν ποτέ εκδοθεί"
+        )
+        reparse_btn = QPushButton("Εφαρμογή / επανάληψη ανάλυσης")
+        reparse_btn.clicked.connect(self._reparse)
+        exclude_row = QHBoxLayout()
+        exclude_row.addWidget(self.exclude_edit)
+        exclude_row.addWidget(reparse_btn)
+        exclude_box = QGroupBox("Εξαίρεση παλιών αποδείξεων (σενάριο επανέκδοσης μετά από ακύρωση)")
+        exclude_box.setLayout(exclude_row)
+
         layout = QVBoxLayout()
         layout.addWidget(browse_btn)
         layout.addWidget(self.path_label)
@@ -225,17 +237,26 @@ class LedgerPage(QWizardPage):
         layout.addWidget(self.summary_label)
         layout.addWidget(QLabel("Ανοιχτά τιμολόγια όπως αναγνωρίστηκαν:"))
         layout.addWidget(self.table)
+        layout.addWidget(exclude_box)
         self.setLayout(layout)
 
         self._ledger = None
+        self._path = None
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(self, "Επιλογή καρτέλας PDF", "", "PDF (*.pdf)")
         if not path:
             return
+        self._path = path
         self.path_label.setText(path)
+        self._reparse()
+
+    def _reparse(self):
+        if not self._path:
+            return
+        exclude_codes = {c.strip() for c in self.exclude_edit.text().split(",") if c.strip()}
         try:
-            ledger = parse_ledger(path)
+            ledger = parse_ledger(self._path, exclude_codes=exclude_codes or None)
         except Exception as exc:  # noqa: BLE001 -- εμφανές μήνυμα στο χρήστη
             QMessageBox.critical(self, "Σφάλμα ανάγνωσης", f"Δεν διαβάστηκε το PDF:\n{exc}")
             self._ledger = None
@@ -243,7 +264,8 @@ class LedgerPage(QWizardPage):
             return
 
         self._ledger = ledger
-        self.wizard().ledger_path = path
+        self.wizard().ledger_path = self._path
+        self.wizard().excluded_codes = exclude_codes
 
         if ledger.balance_check_ok:
             self.status_label.setText("✓ Το υπόλοιπο ταιριάζει σε κάθε γραμμή της καρτέλας")
@@ -790,6 +812,7 @@ class ReceiptWizard(QWizard):
 
         self.ledger = None
         self.ledger_path = None
+        self.excluded_codes = set()
         self.open_invoices = []
         self.plan = []
         self.dates = []
