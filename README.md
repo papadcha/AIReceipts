@@ -112,6 +112,17 @@ email -- βλ. `core/company_import.py`. Βασίζεται στο ότι η κ�
 επικόλληση στο πεδίο εξαίρεσης του βήματος "Κάρτελα", σε σενάριο
 επανέκδοσης).
 
-## Τι λείπει από το πλήρες σχέδιο (`DESKTOP_APP_PLAN.md`)
+## Packaging σε `.exe`
 
-Φάση 3+: packaging σε `.exe`.
+```
+pip install -r requirements-build.txt
+pyinstaller AIReceipts.spec
+```
+
+Παράγει ένα αυτόνομο `dist/AIReceipts.exe` -- δεν χρειάζεται εγκατεστημένο
+Python στο μηχάνημα που θα το τρέξει. Η εξάρτηση από
+`C:\Windows\Fonts\arial*.ttf` παραμένει (λογικό για Windows-only εσωτερικό
+εργαλείο). Το `app_data.db` δημιουργείται δίπλα στο `.exe` -- το
+`core/db.py` ανιχνεύει το frozen state (`sys.frozen`) και χρησιμοποιεί το
+φάκελο του `sys.executable` αντί για το (προσωρινό σε onefile build)
+`__file__`. Επιβεβαιώθηκε με πραγματικό build + εκτέλεση του `.exe`.

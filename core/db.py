@@ -6,10 +6,18 @@
 αρχείο `app_data.db` δίπλα στο project."""
 from __future__ import annotations
 
+import sys
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "app_data.db"
+if getattr(sys, "frozen", False):
+    # PyInstaller: __file__ θα έδειχνε στον προσωρινό φάκελο εξαγωγής
+    # (onefile) που διαγράφεται μετά το κλείσιμο -- η βάση πρέπει να μένει
+    # δίπλα στο πραγματικό .exe.
+    _BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    _BASE_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = _BASE_DIR / "app_data.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
