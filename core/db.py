@@ -6,6 +6,7 @@
 αρχείο `app_data.db` δίπλα στο project."""
 from __future__ import annotations
 
+import os
 import sys
 import sqlite3
 import uuid as _uuid
@@ -79,7 +80,8 @@ CREATE TABLE IF NOT EXISTS receipt_runs (
     receipt_no_end INTEGER NOT NULL,
     out_dir TEXT,
     created_at TEXT NOT NULL,
-    source_machine TEXT
+    source_machine TEXT,
+    deleted_at TEXT
 );
 """
 
@@ -123,6 +125,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
     if "source_machine" not in runs_cols:
         conn.execute("ALTER TABLE receipt_runs ADD COLUMN source_machine TEXT")
+    if "deleted_at" not in runs_cols:
+        conn.execute("ALTER TABLE receipt_runs ADD COLUMN deleted_at TEXT")
     conn.commit()
 
 
@@ -248,14 +252,50 @@ def upsert_contact(conn: sqlite3.Connection, *, afm: str, name: str, occupation:
 
 def list_receipt_runs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Ιστορικό εκδόσεων, πιο πρόσφατο πρώτα, με το όνομα εταιρείας/επαφής
-    ήδη joined -- για την οθόνη Ιστορικού."""
+    ήδη joined -- για την οθόνη Ιστορικού. Οι διαγραμμένες (deleted_at,
+    βλ. delete_receipt_run) δεν εμφανίζονται -- μένουν σαν tombstone μόνο
+    για να μη ξαναδιαβαστούν από άλλο μηχάνημα κατά το sync."""
     return conn.execute(
         """SELECT rr.*, c.name AS company_name, ct.name AS contact_name
            FROM receipt_runs rr
            JOIN companies c ON c.id = rr.company_id
            LEFT JOIN contacts ct ON ct.afm = rr.contact_afm
+           WHERE rr.deleted_at IS NULL
            ORDER BY rr.id DESC"""
     ).fetchall()
+
+
+def delete_receipt_run(conn: sqlite3.Connection, run_id: int) -> list[str]:
+    """Soft delete -- ίδιο σχήμα με delete_company: tombstone αντί για
+    DELETE, ώστε η διαγραφή να διαδοθεί σωστά μέσω sync (core/sync.py::
+    _merge_receipt_run) αντί να ξαναδιαβαστεί το ίδιο uuid από άλλο
+    μηχάνημα. Διαγράφει επίσης τα PDF αυτής της συγκεκριμένης εκτέλεσης
+    από το out_dir (εντοπίζονται από τον 6ψήφιο αριθμό απόδειξης στο
+    όνομα αρχείου -- βλ. gui/wizard.py::GeneratePage._generate) -- ΔΕΝ
+    αγγίζει το summary.csv (θα μείνουν εκεί ξεπερασμένες γραμμές, μικρό
+    κόστος έναντι του να ξαναγράφεται/παρσάρεται ένα CSV log αρχείο).
+    Επιστρέφει τα paths των PDF που διαγράφηκαν."""
+    row = conn.execute("SELECT * FROM receipt_runs WHERE id=?", (run_id,)).fetchone()
+    if not row:
+        return []
+    deleted_paths = []
+    out_dir = row["out_dir"]
+    if out_dir and os.path.isdir(out_dir):
+        for no in range(row["receipt_no_start"], row["receipt_no_end"] + 1):
+            suffix = f"{str(no).zfill(6)}.pdf"
+            for fname in os.listdir(out_dir):
+                if fname.endswith(suffix):
+                    path = os.path.join(out_dir, fname)
+                    try:
+                        os.remove(path)
+                        deleted_paths.append(path)
+                    except OSError:
+                        pass
+    conn.execute(
+        "UPDATE receipt_runs SET deleted_at=? WHERE id=?", (_now(), run_id),
+    )
+    conn.commit()
+    return deleted_paths
 
 
 def get_opening_breakdown(conn: sqlite3.Connection, afm: str) -> list[sqlite3.Row]:
@@ -291,12 +331,18 @@ def suggest_next_receipt_no(
     """MAX(receipt_no_end), όχι "τελευταία γραμμή" -- μετά από merge
     (core/sync.py) οι γραμμές άλλων μηχανημάτων μπαίνουν με τοπικό id που
     δεν αντιστοιχεί σε χρονική σειρά, οπότε το ORDER BY id θα έδινε λάθος
-    πρόταση."""
+    πρόταση. Αγνοεί διαγραμμένες (deleted_at, βλ. delete_receipt_run) --
+    σκόπιμο, ώστε η διαγραφή μιας δοκιμαστικής/λανθασμένης εκτέλεσης να
+    ελευθερώνει ξανά τους αριθμούς της. Αν διαγραφεί μια ΕΝΔΙΑΜΕΣΗ (όχι η
+    πιο πρόσφατη) εκτέλεση, η πρόταση μπορεί να ξαναδώσει αριθμούς που
+    ήδη χρησιμοποιεί μια μεταγενέστερη -- αποδεκτό εδώ αφού ο χρήστης
+    κρατάει το πραγματικό φορολογικό ιστορικό στο λογιστικό πρόγραμμα,
+    όχι εδώ."""
     if company_id is None:
         return None
     row = conn.execute(
         """SELECT MAX(receipt_no_end) AS max_no FROM receipt_runs
-           WHERE company_id=? AND seira=? AND receipt_prefix=?""",
+           WHERE company_id=? AND seira=? AND receipt_prefix=? AND deleted_at IS NULL""",
         (company_id, seira, receipt_prefix),
     ).fetchone()
     return (row["max_no"] + 1) if row and row["max_no"] is not None else None

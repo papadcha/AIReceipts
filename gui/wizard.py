@@ -1052,10 +1052,13 @@ class HistoryDialog(QDialog):
         open_btn.clicked.connect(self._open_folder)
         copy_btn = QPushButton("Αντιγραφή κωδικών (για εξαίρεση σε επανέκδοση)")
         copy_btn.clicked.connect(self._copy_codes)
+        delete_btn = QPushButton("Διαγραφή...")
+        delete_btn.clicked.connect(self._delete_run)
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(open_btn)
         btn_row.addWidget(copy_btn)
+        btn_row.addWidget(delete_btn)
         btn_row.addStretch(1)
 
         layout = QVBoxLayout()
@@ -1109,6 +1112,32 @@ class HistoryDialog(QDialog):
             for n in range(r["receipt_no_start"], r["receipt_no_end"] + 1)
         ]
         QApplication.clipboard().setText(", ".join(codes))
+
+    def _delete_run(self):
+        r = self._selected_row()
+        if not r:
+            QMessageBox.information(
+                self, "Καμία επιλογή", "Επίλεξε πρώτα μια εκτέλεση από τη λίστα.",
+            )
+            return
+        no_range = (
+            f"{r['receipt_prefix']}{str(r['receipt_no_start']).zfill(r['receipt_padding'])}"
+            f"..{r['receipt_prefix']}{str(r['receipt_no_end']).zfill(r['receipt_padding'])}"
+        )
+        reply = QMessageBox.question(
+            self, "Διαγραφή εκτέλεσης",
+            f'Διαγραφή {no_range} ({r["company_name"]}); Θα διαγραφούν και τα PDF αυτής '
+            "της εκτέλεσης από τον φάκελο εξόδου (όχι το summary.csv). Η διαγραφή θα "
+            "διαδοθεί και σε άλλους σταθμούς στο επόμενο συγχρονισμό τους.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        deleted_paths = dbmod.delete_receipt_run(DB, r["id"])
+        self._reload()
+        QMessageBox.information(
+            self, "Έγινε η διαγραφή", f"Διαγράφηκαν {len(deleted_paths)} PDF αρχεία.",
+        )
 
 
 class SyncSettingsDialog(QDialog):

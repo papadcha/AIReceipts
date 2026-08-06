@@ -240,11 +240,29 @@ def _merge_contact(conn, c: dict) -> bool:
 
 
 def _merge_receipt_run(conn, r: dict) -> bool:
+    """Insert-if-missing βάσει uuid, ΚΑΙ tombstone-aware -- ίδιο πρόβλημα με
+    το _merge_company αν δεν το χειριζόμασταν: χωρίς αυτό, μια διαγραφή
+    (core/db.py::delete_receipt_run) σε ένα μηχάνημα θα ξαναδιάβαζε το
+    ίδιο uuid από το manifest ενός άλλου μηχανήματος που δεν το έμαθε ποτέ
+    διαγραμμένο. Δεν χρειάζεται LWW/updated_at εδώ όπως στις εταιρείες --
+    μια διαγραφή είναι μονής κατεύθυνσης (δεν "ξαναζωντανεύει" ποτέ ένα
+    receipt_run, αφού κάθε νέα έκδοση παίρνει καινούργιο uuid), οπότε ένα
+    tombstone που βρέθηκε κάπου κερδίζει πάντα."""
     ruuid = r.get("uuid")
     if not ruuid:
         return False
-    if conn.execute("SELECT 1 FROM receipt_runs WHERE uuid=?", (ruuid,)).fetchone():
+    existing = conn.execute(
+        "SELECT deleted_at FROM receipt_runs WHERE uuid=?", (ruuid,),
+    ).fetchone()
+    if existing:
+        if r.get("deleted_at") and not existing["deleted_at"]:
+            conn.execute(
+                "UPDATE receipt_runs SET deleted_at=? WHERE uuid=?", (r["deleted_at"], ruuid),
+            )
+            return True
         return False
+    if r.get("deleted_at"):
+        return False  # tombstone για run που αυτό το μηχάνημα δεν είχε ποτέ -- τίποτα να διαγράψει
     company = conn.execute(
         "SELECT id FROM companies WHERE name=?", (r.get("company_name"),),
     ).fetchone()
