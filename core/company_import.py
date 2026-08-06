@@ -27,10 +27,15 @@ def extract_company_header(pdf_path: str) -> dict[str, str]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
     header_lines: list[str] = []
+    marker_found = False
     for line in lines:
         if RECEIPT_MARKER_RE.match(line):
+            marker_found = True
             break
         header_lines.append(line)
+
+    if not marker_found:
+        return dict(zip(FIELDS, [""] * 5))
 
     values = header_lines[:5] + [""] * max(0, 5 - len(header_lines))
     return dict(zip(FIELDS, values))
