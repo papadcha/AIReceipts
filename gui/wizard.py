@@ -1180,16 +1180,61 @@ class SyncSettingsDialog(QDialog):
         )
         info.setWordWrap(True)
 
+        restore_btn = QPushButton("Επαναφορά πριν τις δοκιμές...")
+        restore_btn.clicked.connect(self._restore_pretest_state)
+        restore_info = QLabel(
+            "Διαθέσιμο μόνο αφού έχεις απενεργοποιήσει τον συγχρονισμό έστω μία φορά -- "
+            "επαναφέρει τη βάση (εταιρείες/επαφές/ιστορικό) ΚΑΙ τα PDF στην ακριβή κατάσταση "
+            "πριν την απενεργοποίηση, διαγράφοντας ό,τι δημιουργήθηκε στο μεταξύ. Χρησιμοποίησέ "
+            "το πριν ξανα-ενεργοποιήσεις τον συγχρονισμό, ώστε δοκιμαστικά δεδομένα να μη "
+            "φτάσουν ποτέ στο cloud."
+        )
+        restore_info.setWordWrap(True)
+        restore_info.setStyleSheet("color: #6b7a99;")
+
         layout = QVBoxLayout()
         layout.addLayout(form)
         layout.addWidget(info)
         layout.addWidget(save_btn)
+        layout.addWidget(restore_btn)
+        layout.addWidget(restore_info)
         self.setLayout(layout)
 
     def _save(self):
         syncmod.save_remote_path(self.remote_edit.text().strip())
         syncmod.set_main_machine(self.is_main_checkbox.isChecked())
-        syncmod.set_sync_enabled(self.sync_enabled_checkbox.isChecked())
+        syncmod.set_sync_enabled(self.sync_enabled_checkbox.isChecked(), conn=DB)
+        self.accept()
+
+    def _restore_pretest_state(self):
+        if not syncmod.has_pretest_snapshot():
+            QMessageBox.information(
+                self, "Κανένα στιγμιότυπο",
+                "Δεν υπάρχει στιγμιότυπο πριν τις δοκιμές -- ο συγχρονισμός δεν έχει "
+                "απενεργοποιηθεί ποτέ σε αυτό το μηχάνημα, ή έχει ήδη γίνει επαναφορά.",
+            )
+            return
+        reply = QMessageBox.question(
+            self, "Επαναφορά πριν τις δοκιμές",
+            "Θα επαναφερθεί η βάση δεδομένων στην ακριβή κατάσταση πριν απενεργοποιηθεί ο "
+            "συγχρονισμός, και θα διαγραφούν τα δοκιμαστικά PDF/φάκελοι εταιρειών που "
+            "δημιουργήθηκαν έκτοτε. Δεν αναιρείται. Συνέχεια;",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        global DB
+        result = syncmod.restore_pretest_state(DB)
+        if not result.get("ok"):
+            QMessageBox.critical(self, "Σφάλμα", result.get("error", "Άγνωστο σφάλμα"))
+            return
+        DB = dbmod.get_connection()
+        QMessageBox.information(
+            self, "Έγινε η επαναφορά",
+            f"Διαγράφηκαν {result['removed_dirs']} δοκιμαστικοί φάκελοι εταιρειών και "
+            f"{result['removed_files']} μεμονωμένα δοκιμαστικά PDF.\n\nΚλείσε και ξανάνοιξε την "
+            "εφαρμογή για να είσαι σίγουρος ότι όλα τα παράθυρα βλέπουν τη φρέσκια βάση.",
+        )
         self.accept()
 
 
@@ -1233,6 +1278,11 @@ class LauncherWindow(QWidget):
         self.setWindowTitle("Αiποδείξεις")
         self.resize(360, 260)
 
+        self.sync_badge = QLabel("")
+        self.sync_badge.setAlignment(Qt.AlignCenter)
+        self.sync_badge.setWordWrap(True)
+        self._refresh_sync_badge()
+
         self.presence_label = QLabel("(θα ελεγχθεί στο πρώτο συγχρονισμό)")
         self.presence_label.setAlignment(Qt.AlignCenter)
         self.presence_label.setWordWrap(True)
@@ -1251,6 +1301,7 @@ class LauncherWindow(QWidget):
         settings_btn.clicked.connect(self._show_sync_settings)
 
         layout = QVBoxLayout()
+        layout.addWidget(self.sync_badge)
         layout.addWidget(self.presence_label)
         layout.addWidget(self.new_btn)
         layout.addWidget(self.history_btn)
@@ -1268,6 +1319,24 @@ class LauncherWindow(QWidget):
         self._pending_after_sync = None
 
         self.status_label.setText("Δεν έχει γίνει ακόμα συγχρονισμός σε αυτή τη συνεδρία.")
+
+    def _refresh_sync_badge(self):
+        """Ορατό badge στην αρχική οθόνη, χωρίς κλικ -- ώστε να είναι
+        αμέσως φανερό αν αυτό το μηχάνημα μιλάει με το πραγματικό remote
+        αυτή τη στιγμή ή όχι (π.χ. μηχάνημα δοκιμών με το sync σκόπιμα
+        ανενεργό)."""
+        if syncmod.is_sync_enabled():
+            self.sync_badge.setText("🟢 Συγχρονισμός: Ενεργός")
+            self.sync_badge.setStyleSheet(
+                f"background: {STATUS_OK_BG}; border: 1px solid {STATUS_OK_BORDER}; "
+                f"color: {STATUS_OK_COLOR}; font-weight: bold; padding: 6px; border-radius: 6px;"
+            )
+        else:
+            self.sync_badge.setText("🔴 Συγχρονισμός: Ανενεργός")
+            self.sync_badge.setStyleSheet(
+                f"background: {STATUS_DANGER_BG}; border: 1px solid {STATUS_DANGER_BORDER}; "
+                f"color: {STATUS_DANGER_COLOR}; font-weight: bold; padding: 6px; border-radius: 6px;"
+            )
 
     def _ensure_first_sync(self, on_done):
         """Καλείται από κάθε κουμπί που πραγματικά χρειάζεται φρέσκα
@@ -1373,6 +1442,7 @@ class LauncherWindow(QWidget):
     def _show_sync_settings(self):
         self._sync_dialog = SyncSettingsDialog(self)
         self._sync_dialog.exec()
+        self._refresh_sync_badge()
 
 
 def _sync_on_quit():

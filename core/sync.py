@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -107,8 +108,91 @@ def is_sync_enabled() -> bool:
     return _load_config().get("sync_enabled", True)
 
 
-def set_sync_enabled(value: bool) -> None:
-    _save_config(sync_enabled=bool(value))
+# --------------------------------------------------- pre-test snapshot --
+# Όταν ο χρήστης απενεργοποιεί το sync για να κάνει δοκιμές (νέες
+# εταιρείες, δοκιμαστικές αποδείξεις/PDF), το set_sync_enabled(False)
+# παίρνει αυτόματα ένα "στιγμιότυπο": αντίγραφο του app_data.db, και μια
+# ΕΛΑΦΡΙΑ λίστα (όχι αντίγραφα -- τα PDF μπορεί να είναι μεγάλα) με τα
+# ονόματα αρχείων που ήδη υπάρχουν στον φάκελο εξόδου κάθε εταιρείας.
+# restore_pretest_state() αργότερα ξαναφέρνει τη βάση σε αυτό ακριβώς το
+# σημείο, και διαγράφει ό,τι PDF/φάκελο εταιρείας δεν ήταν στη λίστα --
+# δηλαδή δημιουργήθηκε κατά τη δοκιμή. Ρητή απόφαση του χρήστη
+# (2026-08-06): file-level backup/restore, όχι row-by-row diffing.
+def _db_backup_path() -> Path:
+    return dbmod.DB_PATH.with_suffix(dbmod.DB_PATH.suffix + ".presync_backup")
+
+
+def _snapshot_path() -> Path:
+    return dbmod.DB_PATH.parent / "presync_snapshot.json"
+
+
+def has_pretest_snapshot() -> bool:
+    return _db_backup_path().exists() and _snapshot_path().exists()
+
+
+def _take_pretest_snapshot(conn) -> None:
+    shutil.copy2(dbmod.DB_PATH, _db_backup_path())
+    companies = {}
+    for row in conn.execute(
+        "SELECT name, output_dir FROM companies WHERE output_dir IS NOT NULL AND output_dir != ''"
+    ):
+        if os.path.isdir(row["output_dir"]):
+            files = os.listdir(row["output_dir"])
+        else:
+            files = []
+        companies[row["name"]] = {"output_dir": row["output_dir"], "files": files}
+    _snapshot_path().write_text(json.dumps(companies, ensure_ascii=False), encoding="utf-8")
+
+
+def set_sync_enabled(value: bool, conn=None) -> None:
+    """conn is only needed when turning sync OFF (to take the pre-test
+    snapshot) -- callers turning it back ON can omit it. Δεν ξαναπαίρνει
+    στιγμιότυπο αν είναι ήδη ανενεργό (θα αντικαθιστούσε το καθαρό
+    backup με ήδη-δοκιμαστική κατάσταση)."""
+    value = bool(value)
+    if value is False and is_sync_enabled() and conn is not None:
+        _take_pretest_snapshot(conn)
+    _save_config(sync_enabled=value)
+
+
+def restore_pretest_state(conn) -> dict:
+    """Επαναφέρει τη βάση + τους φακέλους εξόδου στο στιγμιότυπο πριν τις
+    δοκιμές. ΚΛΕΙΝΕΙ το conn που πήρε (πρέπει να ξανανοίξει καινούργιο ο
+    caller μετά, αφού το ίδιο το αρχείο app_data.db αντικαθίσταται) --
+    βλ. gui/wizard.py για το πώς ανανεώνεται το module-level DB."""
+    if not has_pretest_snapshot():
+        return {"ok": False, "error": "Δεν υπάρχει στιγμιότυπο πριν τις δοκιμές."}
+
+    snapshot = json.loads(_snapshot_path().read_text(encoding="utf-8"))
+    removed_dirs = 0
+    removed_files = 0
+
+    current_companies = {
+        row["name"]: row["output_dir"] for row in conn.execute("SELECT name, output_dir FROM companies")
+    }
+    for name, output_dir in current_companies.items():
+        if not output_dir or not os.path.isdir(output_dir):
+            continue
+        if name not in snapshot:
+            # Ολόκληρη εταιρεία που δεν υπήρχε πριν τις δοκιμές -- ολόκληρος
+            # ο φάκελός της είναι δοκιμαστικός.
+            shutil.rmtree(output_dir, ignore_errors=True)
+            removed_dirs += 1
+            continue
+        known_files = set(snapshot[name]["files"])
+        for fname in os.listdir(output_dir):
+            if fname not in known_files:
+                try:
+                    os.remove(os.path.join(output_dir, fname))
+                    removed_files += 1
+                except OSError:
+                    pass
+
+    conn.close()
+    shutil.copy2(_db_backup_path(), dbmod.DB_PATH)
+    _db_backup_path().unlink(missing_ok=True)
+    _snapshot_path().unlink(missing_ok=True)
+    return {"ok": True, "removed_dirs": removed_dirs, "removed_files": removed_files}
 
 
 def sanitize(name: str) -> str:
