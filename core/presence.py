@@ -20,6 +20,14 @@ from core import sync as syncmod
 
 PRESENCE_SUBDIR = "presence"
 
+# Πόσο "φρέσκο" πρέπει να είναι το last_seen για να μετράει ως ενεργός τώρα.
+# Πρέπει να είναι αρκετά μεγαλύτερο από το interval του heartbeat retry
+# (βλ. gui/wizard.py -- ξαναστέλνεται κάθε 60s όσο η εφαρμογή είναι ανοιχτή)
+# ώστε ένα απλό δίκτυο lag να μην κάνει κάποιον να φαίνεται εσφαλμένα
+# "έφυγε". Χωρίς αυτό το φίλτρο, ένα heartbeat από μια εφαρμογή που έκλεισε
+# απότομα (crash/kill, όχι καθαρό κλείσιμο) έμενε "ενεργός" επ' άπειρον.
+PRESENCE_TTL_SECONDS = 180
+
 
 def _identity() -> dict:
     user = os.environ.get("USERNAME") or os.environ.get("USER") or "άγνωστος"
@@ -55,7 +63,12 @@ def send_heartbeat() -> dict:
         json.dump(payload, tmp, ensure_ascii=False)
         tmp_path = tmp.name
     try:
-        r = syncmod.run_rclone(["copyto", tmp_path, dest], timeout=30)
+        # --ignore-times: το payload έχει σχεδόν πάντα το ίδιο μέγεθος byte
+        # (μόνο η ώρα αλλάζει μέσα σε ένα σταθερό ISO timestamp) -- χωρίς
+        # αυτό, το rclone/Mega backend βλέπει "ίδιο μέγεθος" και σιωπηλά
+        # ΔΕΝ ξανανεβάζει το αρχείο, οπότε το last_seen θα έμενε παγωμένο
+        # στην πρώτη ποτέ αποστολή ό,τι κι αν έκανε το περιοδικό heartbeat.
+        r = syncmod.run_rclone(["copyto", tmp_path, dest, "--ignore-times"], timeout=30)
     finally:
         try:
             os.unlink(tmp_path)
@@ -65,6 +78,31 @@ def send_heartbeat() -> dict:
     if not r["ok"]:
         return {"ok": False, "error": r["error"]}
     return {"ok": True, "path": dest}
+
+
+def clear_presence() -> dict:
+    """Best-effort διαγραφή του δικού μας presence αρχείου -- καλείται στο
+    καθαρό κλείσιμο της εφαρμογής, ώστε οι άλλοι σταθμοί να δουν άμεσα ότι
+    φύγαμε αντί να περιμένουν το PRESENCE_TTL_SECONDS να λήξει. Δεν είναι το
+    μόνο μέτρο -- σε crash/kill αυτό δεν προλαβαίνει να τρέξει, γι' αυτό
+    υπάρχει και το TTL φίλτρο στο list_presence()."""
+    remote_dir = _remote_dir()
+    if remote_dir is None:
+        return {"ok": True, "skipped": True, "reason": "no_remote_configured"}
+    ident = _identity()
+    dest = f"{remote_dir}/{syncmod.sanitize(ident['computer'])}__{syncmod.sanitize(ident['user'])}.json"
+    return syncmod.run_rclone(["deletefile", dest], timeout=15)
+
+
+def _is_stale(last_seen: str) -> bool:
+    try:
+        seen = datetime.fromisoformat(last_seen)
+    except ValueError:
+        return True  # κατεστραμμένη/άγνωστη μορφή -- πιο ασφαλές να αγνοηθεί
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - seen).total_seconds()
+    return age > PRESENCE_TTL_SECONDS
 
 
 def list_presence(exclude_self: bool = True, timeout: int = 60) -> list[dict]:
@@ -89,6 +127,8 @@ def list_presence(exclude_self: bool = True, timeout: int = 60) -> list[dict]:
             if not (data.get("user") and data.get("last_seen")):
                 continue
             if exclude_self and data.get("user") == me["user"] and data.get("computer") == me["computer"]:
+                continue
+            if _is_stale(data["last_seen"]):
                 continue
             result.append({
                 "user": data.get("user", ""),

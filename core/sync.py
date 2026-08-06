@@ -325,7 +325,14 @@ def share_smtp_password(conn, company_name: str) -> dict:
         path = os.path.join(tmp, fname)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
-        return run_rclone(["copyto", path, f"{remote}/smtp-credentials/{fname}"], timeout=30)
+        # --ignore-times: βλ. core/presence.py::send_heartbeat -- το rclone/
+        # Mega backend σιωπηλά προσπερνάει το ανέβασμα αν το νέο αρχείο έχει
+        # ίδιο μέγεθος με το προηγούμενο στο ίδιο path (π.χ. re-share ίδιου
+        # μήκους password), οπότε χωρίς αυτό ένα ξαναμοίρασμα θα φαινόταν
+        # πετυχημένο ενώ ουσιαστικά δεν άλλαξε τίποτα στο remote.
+        return run_rclone(
+            ["copyto", path, f"{remote}/smtp-credentials/{fname}", "--ignore-times"], timeout=30,
+        )
 
 
 def _pull_smtp_credentials(conn) -> int:
@@ -432,12 +439,22 @@ def sync_shutdown(conn) -> dict:
         manifest_path = os.path.join(tmp, f"{hostname}.json")
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, default=str)
+        # --ignore-times σε ΚΑΙ τα δύο copyto εδώ -- βλ. core/presence.py::
+        # send_heartbeat για το γιατί: το rclone/Mega backend σιωπηλά
+        # προσπερνάει ένα ανέβασμα αν το νέο αρχείο έχει ίδιο μέγεθος με το
+        # ήδη αποθηκευμένο στο ίδιο path -- εντελώς εύλογο για ένα manifest
+        # μετά από μια μικρή αλλαγή (π.χ. ίδιου μήκους επωνυμία) ή για ένα
+        # SQLite backup μετά από λίγες γραμμές αλλαγή (σταθερό page size).
+        # Χωρίς αυτό, sync_shutdown θα ανέφερε επιτυχία ενώ το remote θα
+        # έμενε αθόρυβα μπαγιάτικο.
         r_manifest = run_rclone(
-            ["copyto", manifest_path, f"{remote}/manifests/{hostname}.json"], timeout=60,
+            ["copyto", manifest_path, f"{remote}/manifests/{hostname}.json", "--ignore-times"],
+            timeout=60,
         )
 
     r_backup = run_rclone(
-        ["copyto", str(dbmod.DB_PATH), f"{remote}/backup/{hostname}/app_data.db"], timeout=60,
+        ["copyto", str(dbmod.DB_PATH), f"{remote}/backup/{hostname}/app_data.db", "--ignore-times"],
+        timeout=60,
     )
 
     pdf_results = []

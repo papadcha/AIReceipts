@@ -1015,13 +1015,17 @@ class ReceiptWizard(QWizard):
         # να είναι ορατό σε ΚΑΘΕ βήμα του wizard (ιδίως στις Ημερομηνίες,
         # όπου γίνεται η αρίθμηση), όχι μόνο πριν ανοίξει κανείς το wizard.
         # Timeout κοντό (8s) ώστε μια αργή σύνδεση να μην παγώνει το UI για
-        # πολύ κάθε φορά που τρέχει ο timer.
+        # πολύ κάθε φορά που τρέχει ο timer. Ξαναστέλνει ΚΑΙ heartbeat (όχι
+        # μόνο refresh) -- το heartbeat στέλνεται αλλιώς μόνο μία φορά στο
+        # άνοιγμα, οπότε ένα wizard ανοιχτό πάνω από PRESENCE_TTL_SECONDS θα
+        # φαινόταν "έφυγε" στους άλλους σταθμούς ενώ ακόμα δουλεύει κανείς.
         self._presence_timer = QTimer(self)
         self._presence_timer.timeout.connect(self._refresh_presence_title)
         self._presence_timer.start(60_000)
         self._refresh_presence_title()
 
     def _refresh_presence_title(self):
+        presence.send_heartbeat()
         others = presence.list_presence(timeout=8)
         if others:
             names = ", ".join(f"{o['user']}@{o['computer']}" for o in others)
@@ -1218,6 +1222,17 @@ class LauncherWindow(QWidget):
 
         self._run_startup_sync()
 
+        # Ίδιος λόγος με το _presence_timer του ReceiptWizard -- χωρίς αυτό,
+        # ένα launcher ανοιχτό (χωρίς να ξεκινήσει νέα απόδειξη) πάνω από
+        # PRESENCE_TTL_SECONDS θα έδειχνε στους άλλους σταθμούς ότι έφυγε.
+        self._presence_timer = QTimer(self)
+        self._presence_timer.timeout.connect(self._heartbeat_and_refresh_presence)
+        self._presence_timer.start(60_000)
+
+    def _heartbeat_and_refresh_presence(self):
+        presence.send_heartbeat()
+        self._refresh_presence()
+
     def _run_startup_sync(self):
         self.status_label.setText("Συγχρονισμός...")
         QApplication.processEvents()
@@ -1280,6 +1295,10 @@ def _sync_on_quit():
         syncmod.sync_shutdown(DB)
     except Exception:  # noqa: BLE001 -- η εφαρμογή κλείνει ούτως ή άλλως,
         pass            # ένα αποτυχημένο sync δεν πρέπει να την μπλοκάρει
+    try:
+        presence.clear_presence()
+    except Exception:  # noqa: BLE001 -- best-effort, το TTL φίλτρο στο
+        pass            # core/presence.py::list_presence είναι το safety net
 
 
 def _assets_dir() -> Path:
