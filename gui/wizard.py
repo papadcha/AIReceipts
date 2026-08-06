@@ -11,7 +11,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt, QTimer
+from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
@@ -1193,6 +1193,29 @@ class SyncSettingsDialog(QDialog):
         self.accept()
 
 
+class _SyncWorker(QThread):
+    """Τρέχει το sync_startup + heartbeat σε background thread -- χωρίς
+    αυτό, τα rclone subprocess calls (μερικά δευτερόλεπτα το καθένα, πάνω
+    από ένα στη σειρά) μπλοκάρουν το Qt event loop και το Windows δείχνει
+    "Not Responding" όση ώρα διαρκεί το sync. Ανοίγει τη ΔΙΚΗ του σύνδεση
+    SQLite (core/db.py::get_connection) αντί να ξαναχρησιμοποιήσει το
+    module-level DB -- ένα sqlite3.Connection δεν επιτρέπεται να
+    χρησιμοποιηθεί από διαφορετικό thread απ' αυτό που το δημιούργησε."""
+
+    finished_with_result = Signal(dict)
+
+    def run(self):
+        conn = dbmod.get_connection()
+        try:
+            result = syncmod.sync_startup(conn)
+            presence.send_heartbeat()
+        except Exception as exc:  # noqa: BLE001 -- πρέπει να φτάσει στο UI, όχι να σκοτώσει το thread σιωπηλά
+            result = {"ok": False, "error": str(exc)}
+        finally:
+            conn.close()
+        self.finished_with_result.emit(result)
+
+
 class LauncherWindow(QWidget):
     """Πρώτο παράθυρο -- presence badge (ποιος άλλος είναι ενεργός τώρα --
     προειδοποίηση, όχι lock, βλ. core/sync.py), και επιλογή μεταξύ νέας
@@ -1218,20 +1241,20 @@ class LauncherWindow(QWidget):
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("color: #6b7a99;")
 
-        new_btn = QPushButton("Νέα απόδειξη...")
-        new_btn.clicked.connect(self._new_receipt)
-        history_btn = QPushButton("Ιστορικό...")
-        history_btn.clicked.connect(self._show_history)
-        sync_btn = QPushButton("Συγχρονισμός τώρα")
-        sync_btn.clicked.connect(self._run_startup_sync)
+        self.new_btn = QPushButton("Νέα απόδειξη...")
+        self.new_btn.clicked.connect(self._new_receipt)
+        self.history_btn = QPushButton("Ιστορικό...")
+        self.history_btn.clicked.connect(self._show_history)
+        self.sync_btn = QPushButton("Συγχρονισμός τώρα")
+        self.sync_btn.clicked.connect(self._manual_sync)
         settings_btn = QPushButton("Ρυθμίσεις συγχρονισμού...")
         settings_btn.clicked.connect(self._show_sync_settings)
 
         layout = QVBoxLayout()
         layout.addWidget(self.presence_label)
-        layout.addWidget(new_btn)
-        layout.addWidget(history_btn)
-        layout.addWidget(sync_btn)
+        layout.addWidget(self.new_btn)
+        layout.addWidget(self.history_btn)
+        layout.addWidget(self.sync_btn)
         layout.addWidget(settings_btn)
         layout.addWidget(self.status_label)
         self.setLayout(layout)
@@ -1241,24 +1264,51 @@ class LauncherWindow(QWidget):
         self._sync_dialog = None
         self._synced_this_session = False
         self._presence_timer = None
+        self._sync_worker = None
+        self._pending_after_sync = None
 
         self.status_label.setText("Δεν έχει γίνει ακόμα συγχρονισμός σε αυτή τη συνεδρία.")
 
-    def _ensure_first_sync(self):
+    def _ensure_first_sync(self, on_done):
         """Καλείται από κάθε κουμπί που πραγματικά χρειάζεται φρέσκα
         δεδομένα (Νέα απόδειξη/Ιστορικό) -- τρέχει το sync μόνο την πρώτη
-        φορά ανά συνεδρία, όχι σε κάθε κλικ. Το κουμπί "Ρυθμίσεις
-        συγχρονισμού..." (και το checkbox μέσα του) σκόπιμα ΔΕΝ το καλεί."""
+        φορά ανά συνεδρία, όχι σε κάθε κλικ, και ΜΕΤΑ καλεί το on_done()
+        (π.χ. το άνοιγμα του wizard). Το κουμπί "Ρυθμίσεις συγχρονισμού..."
+        (και το checkbox μέσα του) σκόπιμα δεν περνάει ποτέ από εδώ."""
         if self._synced_this_session:
+            on_done()
             return
-        self._run_startup_sync()
+        self._pending_after_sync = on_done
+        self._start_sync_worker()
+
+    def _manual_sync(self):
+        """Το κουμπί "Συγχρονισμός τώρα" -- πάντα ξανατρέχει sync, ακόμα κι
+        αν έχει ήδη γίνει ένα σε αυτή τη συνεδρία (αυτός είναι ο σκοπός
+        του, σε αντίθεση με το αυτόματο πρώτο sync στο _ensure_first_sync)."""
+        self._pending_after_sync = None
+        self._start_sync_worker()
+
+    def _start_sync_worker(self):
+        if self._sync_worker is not None:
+            return  # ήδη τρέχει ένα sync -- τα κουμπιά είναι ούτως ή άλλως απενεργοποιημένα
+        for btn in (self.new_btn, self.history_btn, self.sync_btn):
+            btn.setEnabled(False)
+        self.status_label.setText("Συγχρονισμός...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._sync_worker = _SyncWorker(self)
+        self._sync_worker.finished_with_result.connect(self._on_sync_finished)
+        self._sync_worker.start()
 
     def _heartbeat_and_refresh_presence(self):
         presence.send_heartbeat()
         self._refresh_presence()
 
-    def _run_startup_sync(self):
+    def _on_sync_finished(self, result: dict):
+        self._sync_worker = None
         self._synced_this_session = True
+        QApplication.restoreOverrideCursor()
+        for btn in (self.new_btn, self.history_btn, self.sync_btn):
+            btn.setEnabled(True)
         if self._presence_timer is None:
             # Ίδιος λόγος με το _presence_timer του ReceiptWizard -- χωρίς
             # αυτό, ένα launcher ανοιχτό πάνω από PRESENCE_TTL_SECONDS θα
@@ -1267,14 +1317,6 @@ class LauncherWindow(QWidget):
             self._presence_timer = QTimer(self)
             self._presence_timer.timeout.connect(self._heartbeat_and_refresh_presence)
             self._presence_timer.start(60_000)
-        self.status_label.setText("Συγχρονισμός...")
-        QApplication.processEvents()
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            result = syncmod.sync_startup(DB)
-            presence.send_heartbeat()
-        finally:
-            QApplication.restoreOverrideCursor()
 
         if result.get("skipped"):
             self.status_label.setText("")
@@ -1294,6 +1336,10 @@ class LauncherWindow(QWidget):
             self.status_label.setText(f"Σφάλμα συγχρονισμού: {result.get('error', '')}")
         self._refresh_presence()
 
+        pending, self._pending_after_sync = self._pending_after_sync, None
+        if pending:
+            pending()
+
     def _refresh_presence(self):
         others = presence.list_presence()
         if others:
@@ -1311,12 +1357,16 @@ class LauncherWindow(QWidget):
             )
 
     def _new_receipt(self):
-        self._ensure_first_sync()
+        self._ensure_first_sync(on_done=self._open_new_receipt)
+
+    def _open_new_receipt(self):
         self._wizard = ReceiptWizard()
         self._wizard.show()
 
     def _show_history(self):
-        self._ensure_first_sync()
+        self._ensure_first_sync(on_done=self._open_history)
+
+    def _open_history(self):
         self._history = HistoryDialog(self)
         self._history.show()
 
