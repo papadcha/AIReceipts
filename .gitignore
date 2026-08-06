@@ -4,3 +4,4 @@ app_data.db
 sync_config.json
 build/
 dist/
+installer_output/
