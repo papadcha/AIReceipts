@@ -1153,12 +1153,15 @@ class SyncSettingsDialog(QDialog):
         self.remote_edit = QLineEdit(syncmod.get_remote_path())
         self.is_main_checkbox = QCheckBox("Αυτός είναι ο \"main\" υπολογιστής")
         self.is_main_checkbox.setChecked(syncmod.is_main_machine())
+        self.sync_enabled_checkbox = QCheckBox("Ενεργός συγχρονισμός σε αυτό το μηχάνημα")
+        self.sync_enabled_checkbox.setChecked(syncmod.is_sync_enabled())
         save_btn = QPushButton("Αποθήκευση")
         save_btn.clicked.connect(self._save)
 
         form = QFormLayout()
         form.addRow("Remote (rclone):", self.remote_edit)
         form.addRow("", self.is_main_checkbox)
+        form.addRow("", self.sync_enabled_checkbox)
 
         info = QLabel(
             "π.χ. mega:AIReceipts ή gdrive:AIReceipts -- πρέπει να υπάρχει ήδη "
@@ -1169,7 +1172,11 @@ class SyncSettingsDialog(QDialog):
             "άνοιγμα της εφαρμογής, τα PDF ΟΛΩΝ των σταθμών ανά εταιρεία -- "
             "ώστε να υπάρχει μία πραγματική θέση με όλα τα PDF, όχι μόνο στο "
             "cloud. Μόνο ένας σταθμός θα πρέπει να έχει αυτό το κουτί "
-            "τσεκαρισμένο."
+            "τσεκαρισμένο.\n\nΞεκλίκαρε \"Ενεργός συγχρονισμός\" σε μηχάνημα "
+            "δοκιμών/ανάπτυξης -- η εφαρμογή δουλεύει κανονικά τοπικά, αλλά "
+            "καμία επαφή (pull/push/heartbeat) δεν γίνεται πλέον με το "
+            "πραγματικό κοινόχρηστο remote, ώστε δοκιμαστικά δεδομένα να μη "
+            "φτάνουν ποτέ εκεί."
         )
         info.setWordWrap(True)
 
@@ -1182,6 +1189,7 @@ class SyncSettingsDialog(QDialog):
     def _save(self):
         syncmod.save_remote_path(self.remote_edit.text().strip())
         syncmod.set_main_machine(self.is_main_checkbox.isChecked())
+        syncmod.set_sync_enabled(self.sync_enabled_checkbox.isChecked())
         self.accept()
 
 

@@ -97,6 +97,20 @@ def set_main_machine(value: bool) -> None:
     _save_config(is_main=bool(value))
 
 
+def is_sync_enabled() -> bool:
+    """Τοπική ρύθμιση ανά σταθμό, ΔΕΝ συγχρονίζεται -- προεπιλογή True
+    (ίδια συμπεριφορά με πριν, για όποιον δεν το άγγιξε ποτέ). Σκόπιμα
+    False σε μηχάνημα δοκιμών/ανάπτυξης, ώστε τίποτα από όσα γίνονται εκεί
+    (νέες/δοκιμαστικές εταιρείες, receipt_runs, heartbeat) να μην αγγίζει
+    το πραγματικό shared remote -- ακριβώς το πρόβλημα που δημιούργησε το
+    "ΕΤΑΙΡΕΙΑ Χ" ghost-company περιστατικό αυτής της συνεδρίας."""
+    return _load_config().get("sync_enabled", True)
+
+
+def set_sync_enabled(value: bool) -> None:
+    _save_config(sync_enabled=bool(value))
+
+
 def sanitize(name: str) -> str:
     """Ασφαλές όνομα αρχείου/φακέλου -- ΔΕΝ κάνει strip σε non-ASCII, μόνο
     στους πραγματικά προβληματικούς χαρακτήρες για Windows/cloud paths.
@@ -327,7 +341,10 @@ def sync_startup(conn) -> dict:
     """Κατεβάζει ΟΛΑ τα manifests (κάθε μηχανήματος, μαζί με το δικό μας --
     αβλαβές, idempotent) και τα κάνει merge (companies -- SMTP included --
     /contacts/opening_breakdowns/receipt_runs). Καλείται όταν ανοίγει η
-    εφαρμογή."""
+    εφαρμογή. Καμία επαφή με το remote αν is_sync_enabled() είναι False
+    (μηχάνημα δοκιμών/ανάπτυξης) -- βλ. set_sync_enabled."""
+    if not is_sync_enabled():
+        return {"ok": True, "skipped": True, "reason": "sync_disabled"}
     remote = get_remote_path()
     manifests_dir = f"{remote.rstrip('/')}/manifests"
     stats = {"companies": 0, "contacts": 0, "receipt_runs": 0, "opening_breakdowns": 0}
@@ -377,7 +394,10 @@ def pull_pdfs(conn) -> dict:
 def sync_shutdown(conn) -> dict:
     """Ανεβάζει το δικό μας manifest, ένα backup της τοπικής βάσης, και τα
     PDF κάθε εταιρείας (one-way, additive) προς το remote. Καλείται όταν
-    κλείνει η εφαρμογή."""
+    κλείνει η εφαρμογή. Καμία επαφή με το remote αν is_sync_enabled() είναι
+    False -- βλ. sync_startup / set_sync_enabled."""
+    if not is_sync_enabled():
+        return {"ok": True, "skipped": True, "reason": "sync_disabled"}
     remote = get_remote_path().rstrip("/")
     hostname = _hostname()
 

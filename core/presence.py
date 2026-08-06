@@ -47,6 +47,8 @@ def _remote_dir() -> str | None:
 
 
 def send_heartbeat() -> dict:
+    if not syncmod.is_sync_enabled():
+        return {"ok": True, "skipped": True, "reason": "sync_disabled"}
     remote_dir = _remote_dir()
     if remote_dir is None:
         return {"ok": True, "skipped": True, "reason": "no_remote_configured"}
@@ -86,6 +88,8 @@ def clear_presence() -> dict:
     φύγαμε αντί να περιμένουν το PRESENCE_TTL_SECONDS να λήξει. Δεν είναι το
     μόνο μέτρο -- σε crash/kill αυτό δεν προλαβαίνει να τρέξει, γι' αυτό
     υπάρχει και το TTL φίλτρο στο list_presence()."""
+    if not syncmod.is_sync_enabled():
+        return {"ok": True, "skipped": True, "reason": "sync_disabled"}
     remote_dir = _remote_dir()
     if remote_dir is None:
         return {"ok": True, "skipped": True, "reason": "no_remote_configured"}
@@ -106,6 +110,8 @@ def _is_stale(last_seen: str) -> bool:
 
 
 def list_presence(exclude_self: bool = True, timeout: int = 60) -> list[dict]:
+    if not syncmod.is_sync_enabled():
+        return []
     remote_dir = _remote_dir()
     if remote_dir is None:
         return []
