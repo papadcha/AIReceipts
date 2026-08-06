@@ -1194,17 +1194,23 @@ class SyncSettingsDialog(QDialog):
 
 
 class LauncherWindow(QWidget):
-    """Πρώτο παράθυρο -- sync στο άνοιγμα (pull+merge manifests, heartbeat),
-    presence badge (ποιος άλλος είναι ενεργός τώρα -- προειδοποίηση, όχι
-    lock, βλ. core/sync.py), και επιλογή μεταξύ νέας απόδειξης/ιστορικού/
-    ρυθμίσεων συγχρονισμού."""
+    """Πρώτο παράθυρο -- presence badge (ποιος άλλος είναι ενεργός τώρα --
+    προειδοποίηση, όχι lock, βλ. core/sync.py), και επιλογή μεταξύ νέας
+    απόδειξης/ιστορικού/ρυθμίσεων συγχρονισμού.
+
+    Το sync (pull+merge manifests, heartbeat) ΔΕΝ τρέχει αυτόματα στο
+    άνοιγμα πια -- μόνο στο πρώτο πραγματικό κλικ σε "Νέα απόδειξη"/
+    "Ιστορικό"/"Συγχρονισμός τώρα" (βλ. _ensure_first_sync). Σκόπιμο: αν
+    η εφαρμογή απλά ανοίξει και κανείς δεν κάνει τίποτα, ή κάποιος πάει
+    κατευθείαν στις Ρυθμίσεις για να ξεκλικάρει το "Ενεργός συγχρονισμός"
+    ΠΡΙΝ αγγίξει καθόλου το remote, δεν πρέπει να έχει ήδη τρέξει sync."""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Αiποδείξεις")
         self.resize(360, 260)
 
-        self.presence_label = QLabel("")
+        self.presence_label = QLabel("(θα ελεγχθεί στο πρώτο συγχρονισμό)")
         self.presence_label.setAlignment(Qt.AlignCenter)
         self.presence_label.setWordWrap(True)
 
@@ -1233,21 +1239,34 @@ class LauncherWindow(QWidget):
         self._wizard = None
         self._history = None
         self._sync_dialog = None
+        self._synced_this_session = False
+        self._presence_timer = None
 
+        self.status_label.setText("Δεν έχει γίνει ακόμα συγχρονισμός σε αυτή τη συνεδρία.")
+
+    def _ensure_first_sync(self):
+        """Καλείται από κάθε κουμπί που πραγματικά χρειάζεται φρέσκα
+        δεδομένα (Νέα απόδειξη/Ιστορικό) -- τρέχει το sync μόνο την πρώτη
+        φορά ανά συνεδρία, όχι σε κάθε κλικ. Το κουμπί "Ρυθμίσεις
+        συγχρονισμού..." (και το checkbox μέσα του) σκόπιμα ΔΕΝ το καλεί."""
+        if self._synced_this_session:
+            return
         self._run_startup_sync()
-
-        # Ίδιος λόγος με το _presence_timer του ReceiptWizard -- χωρίς αυτό,
-        # ένα launcher ανοιχτό (χωρίς να ξεκινήσει νέα απόδειξη) πάνω από
-        # PRESENCE_TTL_SECONDS θα έδειχνε στους άλλους σταθμούς ότι έφυγε.
-        self._presence_timer = QTimer(self)
-        self._presence_timer.timeout.connect(self._heartbeat_and_refresh_presence)
-        self._presence_timer.start(60_000)
 
     def _heartbeat_and_refresh_presence(self):
         presence.send_heartbeat()
         self._refresh_presence()
 
     def _run_startup_sync(self):
+        self._synced_this_session = True
+        if self._presence_timer is None:
+            # Ίδιος λόγος με το _presence_timer του ReceiptWizard -- χωρίς
+            # αυτό, ένα launcher ανοιχτό πάνω από PRESENCE_TTL_SECONDS θα
+            # έδειχνε στους άλλους σταθμούς ότι έφυγε. Ξεκινάει μόνο αφού
+            # όντως τρέξει το πρώτο sync, όχι νωρίτερα.
+            self._presence_timer = QTimer(self)
+            self._presence_timer.timeout.connect(self._heartbeat_and_refresh_presence)
+            self._presence_timer.start(60_000)
         self.status_label.setText("Συγχρονισμός...")
         QApplication.processEvents()
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -1292,10 +1311,12 @@ class LauncherWindow(QWidget):
             )
 
     def _new_receipt(self):
+        self._ensure_first_sync()
         self._wizard = ReceiptWizard()
         self._wizard.show()
 
     def _show_history(self):
+        self._ensure_first_sync()
         self._history = HistoryDialog(self)
         self._history.show()
 
