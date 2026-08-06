@@ -76,6 +76,10 @@ class CompanyPage(QWizardPage):
         self.company_combo.currentIndexChanged.connect(self._on_company_selected)
 
         import_btn = QPushButton("Εισαγωγή στοιχείων από δείγμα PDF...")
+        import_btn.setToolTip(
+            "Δέχεται δείγμα απόδειξης (με τίτλο ΑΠΟΔΕΙΞΗ ΕΙΣΠΡΑΞΗΣ/ΠΛΗΡΩΜΗΣ) "
+            "ή κάρτελα πελάτη/προμηθευτή από το λογιστικό."
+        )
         import_btn.clicked.connect(self._import_from_pdf)
 
         self.name = QLineEdit()
@@ -178,7 +182,8 @@ class CompanyPage(QWizardPage):
 
     def _import_from_pdf(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Επιλογή δείγματος απόδειξης PDF", "", "PDF (*.pdf)",
+            self, "Επιλογή PDF (δείγμα απόδειξης ή κάρτελα πελάτη/προμηθευτή)",
+            "", "PDF (*.pdf)",
         )
         if not path:
             return
@@ -190,8 +195,12 @@ class CompanyPage(QWizardPage):
         if not any(fields.values()):
             QMessageBox.warning(
                 self, "Καμία κεφαλίδα δεν αναγνωρίστηκε",
-                "Δεν βρέθηκαν στοιχεία εταιρείας πριν τον τίτλο της απόδειξης σε αυτό "
-                "το PDF -- συμπλήρωσε τα πεδία χειροκίνητα.",
+                "Δεν βρέθηκαν στοιχεία εταιρείας σε αυτό το PDF. Δέχεται μόνο:\n"
+                "• δείγμα απόδειξης (από αυτή την εφαρμογή ή το laxefsis-receipts), "
+                'με τίτλο "ΑΠΟΔΕΙΞΗ ΕΙΣΠΡΑΞΗΣ/ΠΛΗΡΩΜΗΣ", ή\n'
+                "• κάρτελα πελάτη/προμηθευτή από το λογιστικό (ίδιο export που "
+                'διαβάζει και το βήμα "Κάρτελα").\n'
+                "Συμπλήρωσε τα πεδία χειροκίνητα.",
             )
             return
         self.name.setText(fields["name"])
