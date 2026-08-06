@@ -1153,15 +1153,12 @@ class SyncSettingsDialog(QDialog):
         self.remote_edit = QLineEdit(syncmod.get_remote_path())
         self.is_main_checkbox = QCheckBox("Αυτός είναι ο \"main\" υπολογιστής")
         self.is_main_checkbox.setChecked(syncmod.is_main_machine())
-        self.sync_enabled_checkbox = QCheckBox("Ενεργός συγχρονισμός σε αυτό το μηχάνημα")
-        self.sync_enabled_checkbox.setChecked(syncmod.is_sync_enabled())
         save_btn = QPushButton("Αποθήκευση")
         save_btn.clicked.connect(self._save)
 
         form = QFormLayout()
         form.addRow("Remote (rclone):", self.remote_edit)
         form.addRow("", self.is_main_checkbox)
-        form.addRow("", self.sync_enabled_checkbox)
 
         info = QLabel(
             "π.χ. mega:AIReceipts ή gdrive:AIReceipts -- πρέπει να υπάρχει ήδη "
@@ -1172,11 +1169,9 @@ class SyncSettingsDialog(QDialog):
             "άνοιγμα της εφαρμογής, τα PDF ΟΛΩΝ των σταθμών ανά εταιρεία -- "
             "ώστε να υπάρχει μία πραγματική θέση με όλα τα PDF, όχι μόνο στο "
             "cloud. Μόνο ένας σταθμός θα πρέπει να έχει αυτό το κουτί "
-            "τσεκαρισμένο.\n\nΞεκλίκαρε \"Ενεργός συγχρονισμός\" σε μηχάνημα "
-            "δοκιμών/ανάπτυξης -- η εφαρμογή δουλεύει κανονικά τοπικά, αλλά "
-            "καμία επαφή (pull/push/heartbeat) δεν γίνεται πλέον με το "
-            "πραγματικό κοινόχρηστο remote, ώστε δοκιμαστικά δεδομένα να μη "
-            "φτάνουν ποτέ εκεί."
+            "τσεκαρισμένο.\n\nΤο \"Ενεργός συγχρονισμός\" ρυθμίζεται πλέον από "
+            "το πράσινο/κόκκινο κουμπί στην αρχική οθόνη (πάτα το για να "
+            "εναλλάξεις), όχι από εδώ."
         )
         info.setWordWrap(True)
 
@@ -1203,7 +1198,6 @@ class SyncSettingsDialog(QDialog):
     def _save(self):
         syncmod.save_remote_path(self.remote_edit.text().strip())
         syncmod.set_main_machine(self.is_main_checkbox.isChecked())
-        syncmod.set_sync_enabled(self.sync_enabled_checkbox.isChecked(), conn=DB)
         self.accept()
 
     def _restore_pretest_state(self):
@@ -1270,17 +1264,21 @@ class LauncherWindow(QWidget):
     άνοιγμα πια -- μόνο στο πρώτο πραγματικό κλικ σε "Νέα απόδειξη"/
     "Ιστορικό"/"Συγχρονισμός τώρα" (βλ. _ensure_first_sync). Σκόπιμο: αν
     η εφαρμογή απλά ανοίξει και κανείς δεν κάνει τίποτα, ή κάποιος πάει
-    κατευθείαν στις Ρυθμίσεις για να ξεκλικάρει το "Ενεργός συγχρονισμός"
-    ΠΡΙΝ αγγίξει καθόλου το remote, δεν πρέπει να έχει ήδη τρέξει sync."""
+    κατευθείαν στο πράσινο/κόκκινο κουμπί για να το σβήσει ΠΡΙΝ αγγίξει
+    καθόλου το remote, δεν πρέπει να έχει ήδη τρέξει sync.
+
+    Το sync_badge (κουμπί, όχι label) είναι το ΜΟΝΟ σημείο ενεργοποίησης/
+    απενεργοποίησης του συγχρονισμού -- αντικατέστησε το παλιό checkbox
+    μέσα στο SyncSettingsDialog, ρητό αίτημα του χρήστη ώστε να είναι
+    αμέσως ορατό/κλικαρίσιμο στην αρχική οθόνη, όχι θαμμένο σε dialog."""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Αiποδείξεις")
         self.resize(360, 260)
 
-        self.sync_badge = QLabel("")
-        self.sync_badge.setAlignment(Qt.AlignCenter)
-        self.sync_badge.setWordWrap(True)
+        self.sync_badge = QPushButton("")
+        self.sync_badge.clicked.connect(self._toggle_sync_enabled)
         self._refresh_sync_badge()
 
         self.presence_label = QLabel("(θα ελεγχθεί στο πρώτο συγχρονισμό)")
@@ -1321,21 +1319,34 @@ class LauncherWindow(QWidget):
         self.status_label.setText("Δεν έχει γίνει ακόμα συγχρονισμός σε αυτή τη συνεδρία.")
 
     def _refresh_sync_badge(self):
-        """Ορατό badge στην αρχική οθόνη, χωρίς κλικ -- ώστε να είναι
-        αμέσως φανερό αν αυτό το μηχάνημα μιλάει με το πραγματικό remote
-        αυτή τη στιγμή ή όχι (π.χ. μηχάνημα δοκιμών με το sync σκόπιμα
-        ανενεργό)."""
+        """Ορατό, κλικαρίσιμο badge/κουμπί στην αρχική οθόνη -- αμέσως
+        φανερό αν αυτό το μηχάνημα μιλάει με το πραγματικό remote αυτή τη
+        στιγμή ή όχι (π.χ. μηχάνημα δοκιμών με το sync σκόπιμα ανενεργό),
+        ΚΑΙ ο μόνος τρόπος να το αλλάξεις -- πάτημα = εναλλαγή."""
         if syncmod.is_sync_enabled():
-            self.sync_badge.setText("🟢 Συγχρονισμός: Ενεργός")
+            self.sync_badge.setText("🟢 Συγχρονισμός: Ενεργός (πάτα για απενεργοποίηση)")
             self.sync_badge.setStyleSheet(
                 f"background: {STATUS_OK_BG}; border: 1px solid {STATUS_OK_BORDER}; "
                 f"color: {STATUS_OK_COLOR}; font-weight: bold; padding: 6px; border-radius: 6px;"
             )
         else:
-            self.sync_badge.setText("🔴 Συγχρονισμός: Ανενεργός")
+            self.sync_badge.setText("🔴 Συγχρονισμός: Ανενεργός (πάτα για ενεργοποίηση)")
             self.sync_badge.setStyleSheet(
                 f"background: {STATUS_DANGER_BG}; border: 1px solid {STATUS_DANGER_BORDER}; "
                 f"color: {STATUS_DANGER_COLOR}; font-weight: bold; padding: 6px; border-radius: 6px;"
+            )
+
+    def _toggle_sync_enabled(self):
+        global DB
+        currently_enabled = syncmod.is_sync_enabled()
+        syncmod.set_sync_enabled(not currently_enabled, conn=DB)
+        self._refresh_sync_badge()
+        if currently_enabled:
+            QMessageBox.information(
+                self, "Συγχρονισμός ανενεργός",
+                "Πάρθηκε στιγμιότυπο της τρέχουσας κατάστασης. Μετά τις δοκιμές, χρησιμοποίησε "
+                "\"Επαναφορά πριν τις δοκιμές...\" στις Ρυθμίσεις συγχρονισμού πριν το "
+                "ξανα-ενεργοποιήσεις.",
             )
 
     def _ensure_first_sync(self, on_done):
