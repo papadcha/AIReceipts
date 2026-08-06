@@ -169,10 +169,18 @@ def export_manifest(conn) -> dict:
 
 
 def _merge_company(conn, c: dict) -> bool:
+    """Last-write-wins σε updated_at, με deleted_at ως tombstone -- μια
+    διαγραφή σε ένα μηχάνημα είναι απλά μια ενημέρωση με deleted_at
+    γεμάτο, οπότε ταξιδεύει με το ίδιο ρολόι/σύγκριση με κάθε άλλη αλλαγή
+    (όποια αλλαγή -- edit ή delete -- έχει το πιο πρόσφατο updated_at
+    κερδίζει, βλ. core/db.py::delete_company). Χωρίς αυτό, ένα φρέσκο/άλλο
+    μηχάνημα θα ξαναέφερνε για πάντα μια ήδη διαγραμμένη εταιρεία σε κάθε
+    sync (πραγματικό περιστατικό: το "ΕΤΑΙΡΕΙΑ Χ" test data)."""
     name = c.get("name")
     if not name:
         return False
     remote_updated = c.get("updated_at") or ""
+    remote_deleted_at = c.get("deleted_at")
     local = conn.execute(
         "SELECT updated_at FROM companies WHERE name=?", (name,),
     ).fetchone()
@@ -184,13 +192,17 @@ def _merge_company(conn, c: dict) -> bool:
         conn.execute(
             """UPDATE companies SET subtitle=?, address_line=?, ids_line=?, email=?,
                    receipt_prefix=?, receipt_padding=?, default_cap=?, default_round_step=?,
-                   updated_at=?
+                   updated_at=?, deleted_at=?
                WHERE name=?""",
             (c.get("subtitle"), c.get("address_line"), c.get("ids_line"), c.get("email"),
              c.get("receipt_prefix"), c.get("receipt_padding"), c.get("default_cap"),
-             c.get("default_round_step"), remote_updated, name),
+             c.get("default_round_step"), remote_updated, remote_deleted_at, name),
         )
         return True
+    if remote_deleted_at:
+        # Tombstone για εταιρεία που αυτό το μηχάνημα δεν γνώρισε ποτέ ζωντανή
+        # -- τίποτα να διαγράψει τοπικά, μη δημιουργείς άχρηστη γραμμή.
+        return False
     conn.execute(
         """INSERT INTO companies (name, subtitle, address_line, ids_line, email,
                receipt_prefix, receipt_padding, default_cap, default_round_step, updated_at)

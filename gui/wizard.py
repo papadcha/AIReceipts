@@ -75,6 +75,12 @@ class CompanyPage(QWizardPage):
         self._reload_companies()
         self.company_combo.currentIndexChanged.connect(self._on_company_selected)
 
+        delete_btn = QPushButton("Διαγραφή εταιρείας...")
+        delete_btn.clicked.connect(self._delete_company)
+        combo_row = QHBoxLayout()
+        combo_row.addWidget(self.company_combo, 1)
+        combo_row.addWidget(delete_btn)
+
         import_btn = QPushButton("Εισαγωγή στοιχείων από δείγμα PDF...")
         import_btn.setToolTip(
             "Δέχεται δείγμα απόδειξης (με τίτλο ΑΠΟΔΕΙΞΗ ΕΙΣΠΡΑΞΗΣ/ΠΛΗΡΩΜΗΣ) "
@@ -101,7 +107,7 @@ class CompanyPage(QWizardPage):
         sig_row.addWidget(sig_browse_btn)
 
         form = QFormLayout()
-        form.addRow("Αποθηκευμένη εταιρεία:", self.company_combo)
+        form.addRow("Αποθηκευμένη εταιρεία:", combo_row)
         form.addRow("", import_btn)
         form.addRow("Επωνυμία:", self.name)
         form.addRow("Υπότιτλος:", self.subtitle)
@@ -216,6 +222,28 @@ class CompanyPage(QWizardPage):
         for row in dbmod.list_companies(DB):
             self.company_combo.addItem(row["name"], row["id"])
         self.company_combo.blockSignals(False)
+
+    def _delete_company(self):
+        company_id = self.company_combo.itemData(self.company_combo.currentIndex())
+        if company_id is None:
+            QMessageBox.information(
+                self, "Καμία επιλογή",
+                "Επίλεξε πρώτα μια αποθηκευμένη εταιρεία από τη λίστα.",
+            )
+            return
+        name = self.company_combo.currentText()
+        reply = QMessageBox.question(
+            self, "Διαγραφή εταιρείας",
+            f'Διαγραφή "{name}"; Το ιστορικό αποδείξεών της παραμένει, αλλά θα '
+            "εξαφανιστεί από τη λίστα -- και σε κάθε άλλο σταθμό, στο επόμενο "
+            "συγχρονισμό του.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        dbmod.delete_company(DB, company_id)
+        self._reload_companies()
+        self.company_combo.setCurrentIndex(0)
 
     def _on_company_selected(self, index: int):
         company_id = self.company_combo.itemData(index)

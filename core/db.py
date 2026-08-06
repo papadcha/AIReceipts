@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS companies (
     smtp_port INTEGER,
     smtp_email TEXT,
     smtp_password TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS contacts (
@@ -102,6 +103,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE companies ADD COLUMN smtp_email TEXT")
     if "smtp_password" not in companies_cols:
         conn.execute("ALTER TABLE companies ADD COLUMN smtp_password TEXT")
+    if "deleted_at" not in companies_cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN deleted_at TEXT")
 
     contacts_cols = {row["name"] for row in conn.execute("PRAGMA table_info(contacts)")}
     if "updated_at" not in contacts_cols:
@@ -133,7 +136,26 @@ def get_connection(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def list_companies(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM companies ORDER BY name").fetchall()
+    """Μόνο ζωντανές εταιρείες (deleted_at IS NULL) -- για το dropdown του
+    βήματος "Εταιρεία". Οι διαγραμμένες μένουν στη βάση (tombstone, βλ.
+    delete_company) ώστε η διαγραφή να διαδίδεται σωστά μέσω sync αντί να
+    ξαναεμφανίζεται σε κάθε φρέσκια/άλλη τοπική βάση."""
+    return conn.execute(
+        "SELECT * FROM companies WHERE deleted_at IS NULL ORDER BY name"
+    ).fetchall()
+
+
+def delete_company(conn: sqlite3.Connection, company_id: int) -> None:
+    """Soft delete -- θέτει deleted_at (και updated_at, ίδιο ρολόι με το
+    upsert) αντί να κάνει DELETE, ώστε core/sync.py::_merge_company να έχει
+    ένα LWW-συγκρίσιμο tombstone να στείλει στα άλλα μηχανήματα. Ποτέ δεν
+    πειράζει τα receipt_runs -- το ιστορικό εκδόσεων μένει."""
+    now = _now()
+    conn.execute(
+        "UPDATE companies SET deleted_at=?, updated_at=? WHERE id=?",
+        (now, now, company_id),
+    )
+    conn.commit()
 
 
 def upsert_company(
@@ -169,7 +191,7 @@ def upsert_company(
             """UPDATE companies SET name=?, subtitle=?, address_line=?, ids_line=?,
                email=?, receipt_prefix=?, receipt_padding=?, default_cap=?,
                default_round_step=?, signature_path=?, output_dir=?, smtp_host=?,
-               smtp_port=?, smtp_email=?, smtp_password=?, updated_at=?
+               smtp_port=?, smtp_email=?, smtp_password=?, updated_at=?, deleted_at=NULL
                WHERE id=?""",
             (name, subtitle, address_line, ids_line, email, receipt_prefix,
              receipt_padding, default_cap, default_round_step, signature_path,
@@ -195,7 +217,7 @@ def upsert_company(
                output_dir=excluded.output_dir,
                smtp_host=excluded.smtp_host, smtp_port=excluded.smtp_port,
                smtp_email=excluded.smtp_email, smtp_password=excluded.smtp_password,
-               updated_at=excluded.updated_at
+               updated_at=excluded.updated_at, deleted_at=NULL
            RETURNING id""",
         (name, subtitle, address_line, ids_line, email, receipt_prefix,
          receipt_padding, default_cap, default_round_step, signature_path, output_dir,
