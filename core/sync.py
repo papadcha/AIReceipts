@@ -47,8 +47,8 @@ from core import db as dbmod
 # rclone.exe είναι console app -- χωρίς αυτό, κάθε κλήση ανοιγοκλείνει ένα
 # ορατό console παράθυρο πίσω από το (windowed, χωρίς console) GUI μας.
 # Στο άνοιγμα της εφαρμογής γίνονται αρκετές τέτοιες κλήσεις πίσω-πίσω
-# (manifests, smtp-credentials, heartbeat, pdf pull) -- εξ ου και το
-# αισθητό "flash" παραθύρου πολλές φορές.
+# (manifests, heartbeat, pdf pull) -- εξ ου και το αισθητό "flash"
+# παραθύρου πολλές φορές.
 _SUBPROCESS_KWARGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 RCLONE_BIN = os.environ.get("AIRECEIPTS_RCLONE_PATH") or "rclone"
@@ -141,12 +141,14 @@ def run_rclone(args: list[str], timeout: int = 30) -> dict:
 
 # ------------------------------------------------------------ manifest --
 # Στήλες companies που ΔΕΝ ανεβαίνουν ποτέ στο manifest -- τοπικές
-# διαδρομές αρχείων ή διαπιστευτήρια, χωρίς νόημα (signature_path/
-# output_dir) ή επικίνδυνο (smtp_password σε plaintext στο cloud) να
-# φύγουν από το μηχάνημα.
-_COMPANY_LOCAL_ONLY_COLS = (
-    "signature_path", "output_dir", "smtp_host", "smtp_port", "smtp_email", "smtp_password",
-)
+# διαδρομές αρχείων χωρίς νόημα να φύγουν από το μηχάνημα (signature_path/
+# output_dir). Το SMTP (smtp_host/port/email/password) ΣΥΓΧΡΟΝΙΖΕΤΑΙ πλέον
+# κανονικά σαν τα υπόλοιπα στοιχεία εταιρείας -- ρητή απόφαση του χρήστη
+# (2026-08-06) ώστε κάθε σταθμός να έχει αυτόματα το σωστό email ΚΑΘΕ
+# εταιρείας, όχι μόνο της πρώτης που θα προλάβει ένα one-shot μοίρασμα.
+# Trade-off που αποδέχτηκε ρητά: το app password κάθεται plaintext μόνιμα
+# στο shared manifest (ιδιωτικό Mega account).
+_COMPANY_LOCAL_ONLY_COLS = ("signature_path", "output_dir")
 
 
 def export_manifest(conn) -> dict:
@@ -188,15 +190,18 @@ def _merge_company(conn, c: dict) -> bool:
         if (local["updated_at"] or "") >= remote_updated:
             return False
         # ΔΕΝ αγγίζουμε signature_path/output_dir -- τοπικές διαδρομές
-        # αρχείων του κάθε σταθμού, νόημα μόνο τοπικά.
+        # αρχείων του κάθε σταθμού, νόημα μόνο τοπικά. Το SMTP ΤΟ αγγίζουμε
+        # πλέον (βλ. σχόλιο στο _COMPANY_LOCAL_ONLY_COLS).
         conn.execute(
             """UPDATE companies SET subtitle=?, address_line=?, ids_line=?, email=?,
                    receipt_prefix=?, receipt_padding=?, default_cap=?, default_round_step=?,
+                   smtp_host=?, smtp_port=?, smtp_email=?, smtp_password=?,
                    updated_at=?, deleted_at=?
                WHERE name=?""",
             (c.get("subtitle"), c.get("address_line"), c.get("ids_line"), c.get("email"),
              c.get("receipt_prefix"), c.get("receipt_padding"), c.get("default_cap"),
-             c.get("default_round_step"), remote_updated, remote_deleted_at, name),
+             c.get("default_round_step"), c.get("smtp_host"), c.get("smtp_port"),
+             c.get("smtp_email"), c.get("smtp_password"), remote_updated, remote_deleted_at, name),
         )
         return True
     if remote_deleted_at:
@@ -205,11 +210,13 @@ def _merge_company(conn, c: dict) -> bool:
         return False
     conn.execute(
         """INSERT INTO companies (name, subtitle, address_line, ids_line, email,
-               receipt_prefix, receipt_padding, default_cap, default_round_step, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               receipt_prefix, receipt_padding, default_cap, default_round_step,
+               smtp_host, smtp_port, smtp_email, smtp_password, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (name, c.get("subtitle"), c.get("address_line"), c.get("ids_line"), c.get("email"),
          c.get("receipt_prefix"), c.get("receipt_padding"), c.get("default_cap"),
-         c.get("default_round_step"), remote_updated),
+         c.get("default_round_step"), c.get("smtp_host"), c.get("smtp_port"),
+         c.get("smtp_email"), c.get("smtp_password"), remote_updated),
     )
     return True
 
@@ -297,87 +304,11 @@ def import_manifest(conn, manifest: dict) -> dict:
     return stats
 
 
-# ------------------------------------------------- SMTP credential share --
-# Το smtp_password ΔΕΝ ταξιδεύει ποτέ μέσα στο κανονικό manifest (βλ.
-# _COMPANY_LOCAL_ONLY_COLS) -- ένας σταθμός εργασίας δεν σημαίνει αυτόματα
-# διαφορετική εταιρεία, οπότε δύο σταθμοί μπορεί να χρειάζονται το ΙΔΙΟ
-# SMTP password. Αντί να κάθεται μόνιμα στο cloud (plaintext), το μοίρασμα
-# είναι ρητή, μονομιάς ενέργεια: ανεβαίνει σε ξεχωριστό φάκελο
-# smtp-credentials/, και διαγράφεται μόλις το πάρει ΕΝΑ άλλο μηχάνημα.
-# Γνωστός περιορισμός: αν παραπάνω από ένας άλλος σταθμός το χρειάζεται,
-# μόνο ο πρώτος που θα κάνει sync θα το πάρει αυτόματα -- χρειάζεται νέο
-# "μοίρασμα" για τον επόμενο.
-def share_smtp_password(conn, company_name: str) -> dict:
-    row = conn.execute(
-        "SELECT smtp_host, smtp_port, smtp_email, smtp_password FROM companies WHERE name=?",
-        (company_name,),
-    ).fetchone()
-    if not row or not row["smtp_password"]:
-        return {"ok": False, "error": "Δεν έχουν οριστεί τοπικά SMTP στοιχεία για αυτή την εταιρεία."}
-    remote = get_remote_path().rstrip("/")
-    payload = {
-        "company_name": company_name,
-        "smtp_host": row["smtp_host"], "smtp_port": row["smtp_port"],
-        "smtp_email": row["smtp_email"], "smtp_password": row["smtp_password"],
-    }
-    with tempfile.TemporaryDirectory() as tmp:
-        fname = f"{sanitize(company_name)}.json"
-        path = os.path.join(tmp, fname)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-        # --ignore-times: βλ. core/presence.py::send_heartbeat -- το rclone/
-        # Mega backend σιωπηλά προσπερνάει το ανέβασμα αν το νέο αρχείο έχει
-        # ίδιο μέγεθος με το προηγούμενο στο ίδιο path (π.χ. re-share ίδιου
-        # μήκους password), οπότε χωρίς αυτό ένα ξαναμοίρασμα θα φαινόταν
-        # πετυχημένο ενώ ουσιαστικά δεν άλλαξε τίποτα στο remote.
-        return run_rclone(
-            ["copyto", path, f"{remote}/smtp-credentials/{fname}", "--ignore-times"], timeout=30,
-        )
-
-
-def _pull_smtp_credentials(conn) -> int:
-    """Καλείται από sync_startup. Παίρνει (μόνο) ό,τι διαμοιρασμένο
-    password αφορά εταιρεία που ξέρουμε ήδη τοπικά αλλά χωρίς δικό μας
-    password, το αποθηκεύει, και διαγράφει το αρχείο από το remote -- ώστε
-    να μη μένει εκεί. Το μηχάνημα που το μοιράστηκε (έχει ήδη το δικό του
-    password) το προσπερνάει σιωπηλά, χωρίς να το διαγράψει πρόωρα."""
-    remote = get_remote_path().rstrip("/")
-    creds_dir = f"{remote}/smtp-credentials"
-    consumed = []
-    with tempfile.TemporaryDirectory() as tmp:
-        r = run_rclone(["copy", creds_dir, tmp, "--include", "*.json"], timeout=30)
-        if not r["ok"]:
-            return 0
-        for f in Path(tmp).glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            company_name = data.get("company_name")
-            if not company_name:
-                continue
-            local = conn.execute(
-                "SELECT id, smtp_password FROM companies WHERE name=?", (company_name,),
-            ).fetchone()
-            if not local or local["smtp_password"]:
-                continue  # άγνωστη εδώ ακόμα, ή ήδη έχουμε δικό μας -- δεν το αγγίζουμε
-            conn.execute(
-                "UPDATE companies SET smtp_host=?, smtp_port=?, smtp_email=?, smtp_password=? WHERE id=?",
-                (data.get("smtp_host"), data.get("smtp_port"), data.get("smtp_email"),
-                 data.get("smtp_password"), local["id"]),
-            )
-            consumed.append(f.name)
-        conn.commit()
-    for fname in consumed:
-        run_rclone(["deletefile", f"{creds_dir}/{fname}"], timeout=15)
-    return len(consumed)
-
-
 # --------------------------------------------------------- orchestration --
 def sync_startup(conn) -> dict:
     """Κατεβάζει ΟΛΑ τα manifests (κάθε μηχανήματος, μαζί με το δικό μας --
-    αβλαβές, idempotent) και τα κάνει merge, μετά ελέγχει για διαμοιρασμένα
-    SMTP passwords (βλ. _pull_smtp_credentials). Καλείται όταν ανοίγει η
+    αβλαβές, idempotent) και τα κάνει merge (companies -- SMTP included --
+    /contacts/opening_breakdowns/receipt_runs). Καλείται όταν ανοίγει η
     εφαρμογή."""
     remote = get_remote_path()
     manifests_dir = f"{remote.rstrip('/')}/manifests"
@@ -396,11 +327,9 @@ def sync_startup(conn) -> dict:
             for k in stats:
                 stats[k] += s[k]
             machines += 1
-    smtp_received = _pull_smtp_credentials(conn)
     pdfs_pulled = pull_pdfs(conn) if is_main_machine() else None
     return {
-        "ok": True, "machines": machines, "smtp_received": smtp_received,
-        "pdfs_pulled": pdfs_pulled, **stats,
+        "ok": True, "machines": machines, "pdfs_pulled": pdfs_pulled, **stats,
     }
 
 

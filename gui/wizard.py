@@ -118,11 +118,12 @@ class CompanyPage(QWizardPage):
         form.addRow("Ψηφία αρίθμησης:", self.receipt_padding)
         form.addRow("Υπογραφή υπευθύνου (εικόνα):", sig_row)
 
-        # -- SMTP: τοπικά ανά σταθμό, όχι μέσα στο κανονικό sync manifest
-        # (core/sync.py) -- ένας σταθμός δεν σημαίνει αυτόματα διαφορετική
-        # εταιρεία, οπότε το κουμπί "Κοινή χρήση" στέλνει το password μία
-        # φορά σε άλλο σταθμό μέσω του ίδιου remote, με άμεση διαγραφή μετά
-        # την παραλαβή -- δεν κάθεται μόνιμα εκεί.
+        # -- SMTP: πλέον μέρος του κανονικού sync manifest (core/sync.py),
+        # σαν το όνομα/διεύθυνση -- ίδιο email ανά ΕΤΑΙΡΕΙΑ σε κάθε σταθμό
+        # αυτόματα, χωρίς χειροκίνητο "μοίρασμα". Ρητή απόφαση του χρήστη ότι
+        # το plaintext app password στο shared manifest (ιδιωτικό Mega
+        # account) είναι αποδεκτό ρίσκο έναντι του να χρειάζεται να
+        # ξαναμοιράζεται χειροκίνητα ανά σταθμό/εταιρεία.
         self.smtp_host = QLineEdit()
         self.smtp_host.setPlaceholderText("π.χ. smtp.gmail.com")
         self.smtp_port = QSpinBox()
@@ -132,16 +133,13 @@ class CompanyPage(QWizardPage):
         self.smtp_email.setPlaceholderText("λογαριασμός αποστολής")
         self.smtp_password = QLineEdit()
         self.smtp_password.setEchoMode(QLineEdit.Password)
-        share_btn = QPushButton("Κοινή χρήση password σε άλλο σταθμό...")
-        share_btn.clicked.connect(self._share_smtp_password)
 
         smtp_form = QFormLayout()
         smtp_form.addRow("SMTP server:", self.smtp_host)
         smtp_form.addRow("Θύρα:", self.smtp_port)
         smtp_form.addRow("Λογαριασμός:", self.smtp_email)
         smtp_form.addRow("Κωδικός (app password):", self.smtp_password)
-        smtp_form.addRow("", share_btn)
-        smtp_box = QGroupBox("Αποστολή email (SMTP) -- προαιρετικό, τοπικό ανά σταθμό")
+        smtp_box = QGroupBox("Αποστολή email (SMTP) -- προαιρετικό, συγχρονίζεται ανά εταιρεία")
         smtp_box.setLayout(smtp_form)
 
         layout = QVBoxLayout()
@@ -164,27 +162,6 @@ class CompanyPage(QWizardPage):
         )
         if path:
             self.signature_path_edit.setText(path)
-
-    def _share_smtp_password(self):
-        name = self.name.text().strip()
-        if not name:
-            return
-        if not self.smtp_password.text():
-            QMessageBox.warning(self, "Δεν υπάρχει κωδικός", "Συμπλήρωσε πρώτα τον κωδικό SMTP.")
-            return
-        # αποθηκεύουμε πρώτα τοπικά ό,τι φαίνεται στη φόρμα, ώστε το μοίρασμα
-        # να στείλει ακριβώς αυτό που βλέπει ο χρήστης
-        self.validatePage()
-        result = syncmod.share_smtp_password(DB, name)
-        if result.get("ok"):
-            QMessageBox.information(
-                self, "Έγινε το μοίρασμα",
-                "Ο κωδικός ανέβηκε μία φορά -- θα παραληφθεί αυτόματα και θα "
-                "διαγραφεί από το remote στο επόμενο άνοιγμα της εφαρμογής σε άλλο "
-                "σταθμό που ξέρει ήδη αυτή την εταιρεία.",
-            )
-        else:
-            QMessageBox.critical(self, "Σφάλμα", result.get("error", "Άγνωστο σφάλμα"))
 
     def _import_from_pdf(self):
         path, _ = QFileDialog.getOpenFileName(
